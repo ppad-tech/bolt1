@@ -16,6 +16,8 @@ main = defaultMain $ testGroup "ppad-bolt1" [
   , tlv_tests
   , message_tests
   , envelope_tests
+  , extension_tests
+  , bounds_tests
   , property_tests
   ]
 
@@ -152,6 +154,23 @@ tlv_tests = testGroup "TLV" [
         Left TlvLengthExceedsBounds -> pure ()
         other -> assertFailure $ "expected TlvLengthExceedsBounds: " ++
                                  show other
+  , testCase "decodeTlvStreamWith custom predicate" $ do
+      -- Use a predicate that only knows type 5
+      let isKnown t = t == 5
+          bs = mconcat [
+              encodeBigSize 5, encodeBigSize 2, "hi"
+            ]
+      case decodeTlvStreamWith isKnown bs of
+        Right (TlvStream [r]) -> tlvType r @?= 5
+        other -> assertFailure $ "unexpected: " ++ show other
+  , testCase "decodeTlvStreamRaw returns all records" $ do
+      let bs = mconcat [
+              encodeBigSize 2, encodeBigSize 1, "a"  -- even type
+            , encodeBigSize 5, encodeBigSize 1, "b"  -- odd type
+            ]
+      case decodeTlvStreamRaw bs of
+        Right (TlvStream recs) -> length recs @?= 2
+        Left e -> assertFailure $ "unexpected error: " ++ show e
   ]
 
 -- Message encode/decode tests -------------------------------------------------
@@ -161,32 +180,36 @@ message_tests = testGroup "Messages" [
     testGroup "Init" [
       testCase "encode/decode minimal init" $ do
         let msg = Init "" "" []
-            encoded = encodeMessage (MsgInitVal msg)
-        case decodeMessage MsgInit encoded of
-          Right (MsgInitVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgInitVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgInit encoded of
+            Right (MsgInitVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
     , testCase "encode/decode init with features" $ do
         let msg = Init (BS.pack [0x01]) (BS.pack [0x02, 0x0a]) []
-            encoded = encodeMessage (MsgInitVal msg)
-        case decodeMessage MsgInit encoded of
-          Right (MsgInitVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgInitVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgInit encoded of
+            Right (MsgInitVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
     , testCase "encode/decode init with networks TLV" $ do
         let chainHash = BS.replicate 32 0xab
             msg = Init "" "" [InitNetworks [chainHash]]
-            encoded = encodeMessage (MsgInitVal msg)
-        case decodeMessage MsgInit encoded of
-          Right (MsgInitVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgInitVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgInit encoded of
+            Right (MsgInitVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
     ]
   , testGroup "Error" [
       testCase "encode/decode error" $ do
         let cid = BS.replicate 32 0xff
             msg = Error cid "something went wrong"
-            encoded = encodeMessage (MsgErrorVal msg)
-        case decodeMessage MsgError encoded of
-          Right (MsgErrorVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgErrorVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgError encoded of
+            Right (MsgErrorVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
     , testCase "error insufficient channel_id" $ do
         case decodeMessage MsgError (BS.replicate 31 0x00) of
           Left DecodeInsufficientBytes -> pure ()
@@ -196,48 +219,64 @@ message_tests = testGroup "Messages" [
       testCase "encode/decode warning" $ do
         let cid = BS.replicate 32 0x00
             msg = Warning cid "be careful"
-            encoded = encodeMessage (MsgWarningVal msg)
-        case decodeMessage MsgWarning encoded of
-          Right (MsgWarningVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgWarningVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgWarning encoded of
+            Right (MsgWarningVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
     ]
   , testGroup "Ping" [
       testCase "encode/decode ping" $ do
         let msg = Ping 100 (BS.replicate 10 0x00)
-            encoded = encodeMessage (MsgPingVal msg)
-        case decodeMessage MsgPing encoded of
-          Right (MsgPingVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgPingVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgPing encoded of
+            Right (MsgPingVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
     , testCase "ping with zero ignored" $ do
         let msg = Ping 50 ""
-            encoded = encodeMessage (MsgPingVal msg)
-        case decodeMessage MsgPing encoded of
-          Right (MsgPingVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgPingVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgPing encoded of
+            Right (MsgPingVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
     ]
   , testGroup "Pong" [
       testCase "encode/decode pong" $ do
         let msg = Pong (BS.replicate 100 0x00)
-            encoded = encodeMessage (MsgPongVal msg)
-        case decodeMessage MsgPong encoded of
-          Right (MsgPongVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgPongVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgPong encoded of
+            Right (MsgPongVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
     ]
   , testGroup "PeerStorage" [
       testCase "encode/decode peer_storage" $ do
         let msg = PeerStorage "encrypted blob data"
-            encoded = encodeMessage (MsgPeerStorageVal msg)
-        case decodeMessage MsgPeerStorage encoded of
-          Right (MsgPeerStorageVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgPeerStorageVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgPeerStorage encoded of
+            Right (MsgPeerStorageVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
     ]
   , testGroup "PeerStorageRetrieval" [
       testCase "encode/decode peer_storage_retrieval" $ do
         let msg = PeerStorageRetrieval "retrieved blob"
-            encoded = encodeMessage (MsgPeerStorageRetrievalVal msg)
-        case decodeMessage MsgPeerStorageRet encoded of
-          Right (MsgPeerStorageRetrievalVal decoded) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
+        case encodeMessage (MsgPeerStorageRetrievalVal msg) of
+          Left e -> assertFailure $ "encode failed: " ++ show e
+          Right encoded -> case decodeMessage MsgPeerStorageRet encoded of
+            Right (MsgPeerStorageRetrievalVal decoded, _) -> decoded @?= msg
+            other -> assertFailure $ "unexpected: " ++ show other
+    ]
+  , testGroup "Unknown types" [
+      testCase "decodeMessage unknown even type" $ do
+        case decodeMessage (MsgUnknown 100) "payload" of
+          Left (DecodeUnknownEvenType 100) -> pure ()
+          other -> assertFailure $ "expected unknown even: " ++ show other
+    , testCase "decodeMessage unknown odd type" $ do
+        case decodeMessage (MsgUnknown 101) "payload" of
+          Left (DecodeUnknownOddType 101) -> pure ()
+          other -> assertFailure $ "expected unknown odd: " ++ show other
     ]
   ]
 
@@ -247,16 +286,18 @@ envelope_tests :: TestTree
 envelope_tests = testGroup "Envelope" [
     testCase "encode/decode init envelope" $ do
       let msg = MsgInitVal (Init "" "" [])
-          encoded = encodeEnvelope msg Nothing
-      case decodeEnvelope encoded of
-        Right (Just decoded) -> decoded @?= msg
-        other -> assertFailure $ "unexpected: " ++ show other
+      case encodeEnvelope msg Nothing of
+        Left e -> assertFailure $ "encode failed: " ++ show e
+        Right encoded -> case decodeEnvelope encoded of
+          Right (Just decoded, _) -> decoded @?= msg
+          other -> assertFailure $ "unexpected: " ++ show other
   , testCase "encode/decode ping envelope" $ do
       let msg = MsgPingVal (Ping 10 "")
-          encoded = encodeEnvelope msg Nothing
-      case decodeEnvelope encoded of
-        Right (Just decoded) -> decoded @?= msg
-        other -> assertFailure $ "unexpected: " ++ show other
+      case encodeEnvelope msg Nothing of
+        Left e -> assertFailure $ "encode failed: " ++ show e
+        Right encoded -> case decodeEnvelope encoded of
+          Right (Just decoded, _) -> decoded @?= msg
+          other -> assertFailure $ "unexpected: " ++ show other
   , testCase "unknown even type fails" $ do
       let bs = encodeU16 100 <> "payload"  -- 100 is even, unknown
       case decodeEnvelope bs of
@@ -265,8 +306,8 @@ envelope_tests = testGroup "Envelope" [
   , testCase "unknown odd type ignored" $ do
       let bs = encodeU16 101 <> "payload"  -- 101 is odd, unknown
       case decodeEnvelope bs of
-        Right Nothing -> pure ()  -- ignored
-        other -> assertFailure $ "expected Nothing: " ++ show other
+        Right (Nothing, Nothing) -> pure ()  -- ignored
+        other -> assertFailure $ "expected (Nothing, Nothing): " ++ show other
   , testCase "insufficient bytes for type" $ do
       case decodeEnvelope (BS.pack [0x00]) of
         Left DecodeInsufficientBytes -> pure ()
@@ -279,6 +320,83 @@ envelope_tests = testGroup "Envelope" [
       msgTypeWord MsgWarning @?= 1
       msgTypeWord MsgPeerStorage @?= 7
       msgTypeWord MsgPeerStorageRet @?= 9
+  ]
+
+-- Extension TLV tests ---------------------------------------------------------
+
+extension_tests :: TestTree
+extension_tests = testGroup "Extension TLV" [
+    testCase "encode envelope with extension" $ do
+      let msg = MsgPingVal (Ping 10 "")
+          ext = TlvStream [TlvRecord 100 "extension data"]
+      case encodeEnvelope msg (Just ext) of
+        Left e -> assertFailure $ "encode failed: " ++ show e
+        Right encoded -> do
+          -- Should contain message + extension
+          assertBool "encoded should be longer" (BS.length encoded > 6)
+  , testCase "decode envelope with extension roundtrip" $ do
+      let msg = MsgPingVal (Ping 10 "")
+          ext = TlvStream [TlvRecord 101 "ext"]
+      case encodeEnvelope msg (Just ext) of
+        Left e -> assertFailure $ "encode failed: " ++ show e
+        Right encoded -> case decodeEnvelope encoded of
+          Right (Just decoded, Just decodedExt) -> do
+            decoded @?= msg
+            length (unTlvStream decodedExt) @?= 1
+          other -> assertFailure $ "unexpected: " ++ show other
+  , testCase "decode envelope extension is parsed" $ do
+      -- Manually construct ping + extension TLV
+      let pingPayload = mconcat [encodeU16 10, encodeU16 0]  -- numPong=10, len=0
+          extTlv = mconcat [encodeBigSize 200, encodeBigSize 3, "abc"]
+          envelope = encodeU16 18 <> pingPayload <> extTlv  -- type 18 = ping
+      case decodeEnvelope envelope of
+        Right (Just (MsgPingVal ping), Just (TlvStream [r])) -> do
+          pingNumPongBytes ping @?= 10
+          tlvType r @?= 200
+          tlvValue r @?= "abc"
+        other -> assertFailure $ "unexpected: " ++ show other
+  , testCase "decode envelope with invalid extension fails" $ do
+      -- Ping + invalid TLV (non-strictly-increasing)
+      let pingPayload = mconcat [encodeU16 10, encodeU16 0]
+          badTlv = mconcat [
+              encodeBigSize 100, encodeBigSize 1, "a"
+            , encodeBigSize 50, encodeBigSize 1, "b"  -- 50 < 100, invalid
+            ]
+          envelope = encodeU16 18 <> pingPayload <> badTlv
+      case decodeEnvelope envelope of
+        Left (DecodeInvalidExtension TlvNotStrictlyIncreasing) -> pure ()
+        other -> assertFailure $ "expected invalid extension: " ++ show other
+  ]
+
+-- Bounds checking tests -------------------------------------------------------
+
+bounds_tests :: TestTree
+bounds_tests = testGroup "Bounds checking" [
+    testCase "encode ping with oversized ignored fails" $ do
+      let msg = Ping 10 (BS.replicate 70000 0x00)  -- > 65535
+      case encodeMessage (MsgPingVal msg) of
+        Left EncodeLengthOverflow -> pure ()
+        other -> assertFailure $ "expected overflow: " ++ show other
+  , testCase "encode pong with oversized ignored fails" $ do
+      let msg = Pong (BS.replicate 70000 0x00)
+      case encodeMessage (MsgPongVal msg) of
+        Left EncodeLengthOverflow -> pure ()
+        other -> assertFailure $ "expected overflow: " ++ show other
+  , testCase "encode error with oversized data fails" $ do
+      let msg = Error (BS.replicate 32 0x00) (BS.replicate 70000 0x00)
+      case encodeMessage (MsgErrorVal msg) of
+        Left EncodeLengthOverflow -> pure ()
+        other -> assertFailure $ "expected overflow: " ++ show other
+  , testCase "encode init with oversized features fails" $ do
+      let msg = Init "" (BS.replicate 70000 0x00) []
+      case encodeMessage (MsgInitVal msg) of
+        Left EncodeLengthOverflow -> pure ()
+        other -> assertFailure $ "expected overflow: " ++ show other
+  , testCase "encode peer_storage with oversized blob fails" $ do
+      let msg = PeerStorage (BS.replicate 70000 0x00)
+      case encodeMessage (MsgPeerStorageVal msg) of
+        Left EncodeLengthOverflow -> pure ()
+        other -> assertFailure $ "expected overflow: " ++ show other
   ]
 
 -- Property tests --------------------------------------------------------------
@@ -296,36 +414,62 @@ property_tests = testGroup "Properties" [
   , testProperty "U64 roundtrip" $ \w ->
       decodeU64 (encodeU64 w) == Just (w, "")
   , testProperty "Ping roundtrip" $ \(NonNegative num) bs ->
-      let msg = Ping (fromIntegral (num `mod` 65536 :: Integer))
-                     (BS.pack bs)
-          encoded = encodeMessage (MsgPingVal msg)
-      in case decodeMessage MsgPing encoded of
-           Right (MsgPingVal decoded) -> decoded == msg
-           _ -> False
+      let ignored = BS.pack (take 1000 bs)  -- limit size
+          msg = Ping (fromIntegral (num `mod` 65536 :: Integer)) ignored
+      in case encodeMessage (MsgPingVal msg) of
+           Left _ -> False
+           Right encoded -> case decodeMessage MsgPing encoded of
+             Right (MsgPingVal decoded, rest) ->
+               decoded == msg && BS.null rest
+             _ -> False
   , testProperty "Pong roundtrip" $ \bs ->
-      let msg = Pong (BS.pack bs)
-          encoded = encodeMessage (MsgPongVal msg)
-      in case decodeMessage MsgPong encoded of
-           Right (MsgPongVal decoded) -> decoded == msg
-           _ -> False
+      let ignored = BS.pack (take 1000 bs)
+          msg = Pong ignored
+      in case encodeMessage (MsgPongVal msg) of
+           Left _ -> False
+           Right encoded -> case decodeMessage MsgPong encoded of
+             Right (MsgPongVal decoded, rest) ->
+               decoded == msg && BS.null rest
+             _ -> False
   , testProperty "PeerStorage roundtrip" $ \bs ->
-      let msg = PeerStorage (BS.pack bs)
-          encoded = encodeMessage (MsgPeerStorageVal msg)
-      in case decodeMessage MsgPeerStorage encoded of
-           Right (MsgPeerStorageVal decoded) -> decoded == msg
-           _ -> False
+      let blob = BS.pack (take 1000 bs)
+          msg = PeerStorage blob
+      in case encodeMessage (MsgPeerStorageVal msg) of
+           Left _ -> False
+           Right encoded -> case decodeMessage MsgPeerStorage encoded of
+             Right (MsgPeerStorageVal decoded, rest) ->
+               decoded == msg && BS.null rest
+             _ -> False
   , testProperty "Error roundtrip" $ \bs ->
       let cid = BS.replicate 32 0x00
-          msg = Error cid (BS.pack bs)
-          encoded = encodeMessage (MsgErrorVal msg)
-      in case decodeMessage MsgError encoded of
-           Right (MsgErrorVal decoded) -> decoded == msg
-           _ -> False
+          dat = BS.pack (take 1000 bs)
+          msg = Error cid dat
+      in case encodeMessage (MsgErrorVal msg) of
+           Left _ -> False
+           Right encoded -> case decodeMessage MsgError encoded of
+             Right (MsgErrorVal decoded, rest) ->
+               decoded == msg && BS.null rest
+             _ -> False
+  , testProperty "Envelope with extension roundtrip" $ \bs ->
+      let msg = MsgPingVal (Ping 42 "")
+          extData = BS.pack (take 100 bs)
+          ext = TlvStream [TlvRecord 101 extData]
+      in case encodeEnvelope msg (Just ext) of
+           Left _ -> False
+           Right encoded -> case decodeEnvelope encoded of
+             Right (Just decoded, Just (TlvStream [r])) ->
+               decoded == msg && tlvType r == 101 && tlvValue r == extData
+             _ -> False
   ]
 
 -- Helpers ---------------------------------------------------------------------
 
+-- | Decode hex string. Fails the test on invalid hex.
 unhex :: BS.ByteString -> BS.ByteString
 unhex bs = case B16.decode bs of
   Just r  -> r
-  Nothing -> error $ "invalid hex: " ++ show bs
+  Nothing -> assertFailure' $ "invalid hex: " ++ show bs
+
+-- | assertFailure that returns any type (for use in pure contexts)
+assertFailure' :: String -> a
+assertFailure' msg = error msg
