@@ -326,46 +326,55 @@ envelope_tests = testGroup "Envelope" [
 
 extension_tests :: TestTree
 extension_tests = testGroup "Extension TLV" [
-    testCase "encode envelope with extension" $ do
+    testCase "encode envelope with extension (odd type)" $ do
       let msg = MsgPingVal (Ping 10 "")
-          ext = TlvStream [TlvRecord 100 "extension data"]
+          ext = TlvStream [TlvRecord 101 "extension data"]  -- odd type
       case encodeEnvelope msg (Just ext) of
         Left e -> assertFailure $ "encode failed: " ++ show e
         Right encoded -> do
           -- Should contain message + extension
           assertBool "encoded should be longer" (BS.length encoded > 6)
-  , testCase "decode envelope with extension roundtrip" $ do
+  , testCase "decode envelope with odd extension - skipped per BOLT#1" $ do
+      -- Per BOLT #1: unknown odd types are ignored (skipped)
       let msg = MsgPingVal (Ping 10 "")
-          ext = TlvStream [TlvRecord 101 "ext"]
+          ext = TlvStream [TlvRecord 101 "ext"]  -- odd type
       case encodeEnvelope msg (Just ext) of
         Left e -> assertFailure $ "encode failed: " ++ show e
         Right encoded -> case decodeEnvelope encoded of
-          Right (Just decoded, Just decodedExt) -> do
+          Right (Just decoded, Just (TlvStream [])) -> do
+            -- Extension is empty because unknown odd types are skipped
             decoded @?= msg
-            length (unTlvStream decodedExt) @?= 1
           other -> assertFailure $ "unexpected: " ++ show other
-  , testCase "decode envelope extension is parsed" $ do
-      -- Manually construct ping + extension TLV
+  , testCase "decode envelope with unknown even extension fails" $ do
+      -- Per BOLT #1: unknown even types must cause failure
       let pingPayload = mconcat [encodeU16 10, encodeU16 0]  -- numPong=10, len=0
-          extTlv = mconcat [encodeBigSize 200, encodeBigSize 3, "abc"]
+          extTlv = mconcat [encodeBigSize 100, encodeBigSize 3, "abc"]  -- even!
           envelope = encodeU16 18 <> pingPayload <> extTlv  -- type 18 = ping
       case decodeEnvelope envelope of
-        Right (Just (MsgPingVal ping), Just (TlvStream [r])) -> do
-          pingNumPongBytes ping @?= 10
-          tlvType r @?= 200
-          tlvValue r @?= "abc"
-        other -> assertFailure $ "unexpected: " ++ show other
+        Left (DecodeInvalidExtension (TlvUnknownEvenType 100)) -> pure ()
+        other -> assertFailure $ "expected unknown even error: " ++ show other
   , testCase "decode envelope with invalid extension fails" $ do
       -- Ping + invalid TLV (non-strictly-increasing)
       let pingPayload = mconcat [encodeU16 10, encodeU16 0]
           badTlv = mconcat [
-              encodeBigSize 100, encodeBigSize 1, "a"
-            , encodeBigSize 50, encodeBigSize 1, "b"  -- 50 < 100, invalid
+              encodeBigSize 101, encodeBigSize 1, "a"  -- odd types for this test
+            , encodeBigSize 51, encodeBigSize 1, "b"   -- 51 < 101, invalid
             ]
           envelope = encodeU16 18 <> pingPayload <> badTlv
       case decodeEnvelope envelope of
         Left (DecodeInvalidExtension TlvNotStrictlyIncreasing) -> pure ()
         other -> assertFailure $ "expected invalid extension: " ++ show other
+  , testCase "unknown even in extension fails even with odd types present" $ do
+      -- Mixed odd and even - should fail on the even type
+      let pingPayload = mconcat [encodeU16 10, encodeU16 0]
+          extTlv = mconcat [
+              encodeBigSize 101, encodeBigSize 1, "a"  -- odd, would be skipped
+            , encodeBigSize 200, encodeBigSize 1, "b"  -- even, must fail
+            ]
+          envelope = encodeU16 18 <> pingPayload <> extTlv
+      case decodeEnvelope envelope of
+        Left (DecodeInvalidExtension (TlvUnknownEvenType 200)) -> pure ()
+        other -> assertFailure $ "expected unknown even error: " ++ show other
   ]
 
 -- Bounds checking tests -------------------------------------------------------
@@ -450,15 +459,16 @@ property_tests = testGroup "Properties" [
              Right (MsgErrorVal decoded, rest) ->
                decoded == msg && BS.null rest
              _ -> False
-  , testProperty "Envelope with extension roundtrip" $ \bs ->
+  , testProperty "Envelope with odd extension (skipped per BOLT#1)" $ \bs ->
+      -- Unknown odd types in extensions are skipped per BOLT #1
       let msg = MsgPingVal (Ping 42 "")
           extData = BS.pack (take 100 bs)
-          ext = TlvStream [TlvRecord 101 extData]
+          ext = TlvStream [TlvRecord 101 extData]  -- odd type, will be skipped
       in case encodeEnvelope msg (Just ext) of
            Left _ -> False
            Right encoded -> case decodeEnvelope encoded of
-             Right (Just decoded, Just (TlvStream [r])) ->
-               decoded == msg && tlvType r == 101 && tlvValue r == extData
+             -- Extension should be empty (odd types skipped)
+             Right (Just decoded, Just (TlvStream [])) -> decoded == msg
              _ -> False
   ]
 
