@@ -13,6 +13,9 @@ main :: IO ()
 main = defaultMain $ testGroup "ppad-bolt1" [
     bigsize_tests
   , primitive_tests
+  , signed_tests
+  , truncated_tests
+  , minsigned_tests
   , tlv_tests
   , message_tests
   , envelope_tests
@@ -90,6 +93,166 @@ primitive_tests = testGroup "Primitives" [
       decodeU32 (BS.pack [0x01, 0x02]) @?= Nothing
   , testCase "decodeU64 insufficient" $
       decodeU64 (BS.pack [0x01, 0x02, 0x03, 0x04]) @?= Nothing
+  ]
+
+-- Signed integer tests ---------------------------------------------------------
+
+signed_tests :: TestTree
+signed_tests = testGroup "Signed integers" [
+    testCase "encodeS8 42" $
+      encodeS8 42 @?= BS.pack [0x2a]
+  , testCase "encodeS8 -42" $
+      encodeS8 (-42) @?= BS.pack [0xd6]
+  , testCase "encodeS8 127" $
+      encodeS8 127 @?= BS.pack [0x7f]
+  , testCase "encodeS8 -128" $
+      encodeS8 (-128) @?= BS.pack [0x80]
+  , testCase "decodeS8 42" $
+      decodeS8 (BS.pack [0x2a]) @?= Just (42, "")
+  , testCase "decodeS8 -42" $
+      decodeS8 (BS.pack [0xd6]) @?= Just (-42, "")
+  , testCase "encodeS16 -1" $
+      encodeS16 (-1) @?= BS.pack [0xff, 0xff]
+  , testCase "encodeS16 32767" $
+      encodeS16 32767 @?= BS.pack [0x7f, 0xff]
+  , testCase "encodeS16 -32768" $
+      encodeS16 (-32768) @?= BS.pack [0x80, 0x00]
+  , testCase "decodeS16 -1" $
+      decodeS16 (BS.pack [0xff, 0xff]) @?= Just (-1, "")
+  , testCase "encodeS32 -1" $
+      encodeS32 (-1) @?= BS.pack [0xff, 0xff, 0xff, 0xff]
+  , testCase "encodeS32 2147483647" $
+      encodeS32 2147483647 @?= BS.pack [0x7f, 0xff, 0xff, 0xff]
+  , testCase "encodeS32 -2147483648" $
+      encodeS32 (-2147483648) @?= BS.pack [0x80, 0x00, 0x00, 0x00]
+  , testCase "decodeS32 -1" $
+      decodeS32 (BS.pack [0xff, 0xff, 0xff, 0xff]) @?= Just (-1, "")
+  , testCase "encodeS64 -1" $
+      encodeS64 (-1) @?=
+        BS.pack [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+  , testCase "decodeS64 -1" $
+      decodeS64 (BS.pack [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]) @?=
+        Just (-1, "")
+  ]
+
+-- Truncated unsigned integer tests ---------------------------------------------
+
+truncated_tests :: TestTree
+truncated_tests = testGroup "Truncated unsigned integers" [
+    testCase "encodeTu16 0" $
+      encodeTu16 0 @?= ""
+  , testCase "encodeTu16 1" $
+      encodeTu16 1 @?= BS.pack [0x01]
+  , testCase "encodeTu16 255" $
+      encodeTu16 255 @?= BS.pack [0xff]
+  , testCase "encodeTu16 256" $
+      encodeTu16 256 @?= BS.pack [0x01, 0x00]
+  , testCase "encodeTu16 65535" $
+      encodeTu16 65535 @?= BS.pack [0xff, 0xff]
+  , testCase "decodeTu16 0 bytes" $
+      decodeTu16 0 "" @?= Just (0, "")
+  , testCase "decodeTu16 1 byte" $
+      decodeTu16 1 (BS.pack [0x01]) @?= Just (1, "")
+  , testCase "decodeTu16 2 bytes" $
+      decodeTu16 2 (BS.pack [0x01, 0x00]) @?= Just (256, "")
+  , testCase "decodeTu16 non-minimal fails" $
+      decodeTu16 2 (BS.pack [0x00, 0x01]) @?= Nothing
+  , testCase "encodeTu32 0" $
+      encodeTu32 0 @?= ""
+  , testCase "encodeTu32 1" $
+      encodeTu32 1 @?= BS.pack [0x01]
+  , testCase "encodeTu32 0x010000" $
+      encodeTu32 0x010000 @?= BS.pack [0x01, 0x00, 0x00]
+  , testCase "encodeTu32 0x01000000" $
+      encodeTu32 0x01000000 @?= BS.pack [0x01, 0x00, 0x00, 0x00]
+  , testCase "decodeTu32 0 bytes" $
+      decodeTu32 0 "" @?= Just (0, "")
+  , testCase "decodeTu32 3 bytes" $
+      decodeTu32 3 (BS.pack [0x01, 0x00, 0x00]) @?= Just (0x010000, "")
+  , testCase "decodeTu32 non-minimal fails" $
+      decodeTu32 3 (BS.pack [0x00, 0x01, 0x00]) @?= Nothing
+  , testCase "encodeTu64 0" $
+      encodeTu64 0 @?= ""
+  , testCase "encodeTu64 0x0100000000" $
+      encodeTu64 0x0100000000 @?= BS.pack [0x01, 0x00, 0x00, 0x00, 0x00]
+  , testCase "decodeTu64 5 bytes" $
+      decodeTu64 5 (BS.pack [0x01, 0x00, 0x00, 0x00, 0x00]) @?=
+        Just (0x0100000000, "")
+  , testCase "decodeTu64 non-minimal fails" $
+      decodeTu64 5 (BS.pack [0x00, 0x01, 0x00, 0x00, 0x00]) @?= Nothing
+  ]
+
+-- Minimal signed integer tests (Appendix D) ------------------------------------
+
+minsigned_tests :: TestTree
+minsigned_tests = testGroup "Minimal signed (Appendix D)" [
+    -- Test vectors from BOLT #1 Appendix D
+    testCase "encode 0" $
+      encodeMinSigned 0 @?= unhex "00"
+  , testCase "encode 42" $
+      encodeMinSigned 42 @?= unhex "2a"
+  , testCase "encode -42" $
+      encodeMinSigned (-42) @?= unhex "d6"
+  , testCase "encode 127" $
+      encodeMinSigned 127 @?= unhex "7f"
+  , testCase "encode -128" $
+      encodeMinSigned (-128) @?= unhex "80"
+  , testCase "encode 128" $
+      encodeMinSigned 128 @?= unhex "0080"
+  , testCase "encode -129" $
+      encodeMinSigned (-129) @?= unhex "ff7f"
+  , testCase "encode 15000" $
+      encodeMinSigned 15000 @?= unhex "3a98"
+  , testCase "encode -15000" $
+      encodeMinSigned (-15000) @?= unhex "c568"
+  , testCase "encode 32767" $
+      encodeMinSigned 32767 @?= unhex "7fff"
+  , testCase "encode -32768" $
+      encodeMinSigned (-32768) @?= unhex "8000"
+  , testCase "encode 32768" $
+      encodeMinSigned 32768 @?= unhex "00008000"
+  , testCase "encode -32769" $
+      encodeMinSigned (-32769) @?= unhex "ffff7fff"
+  , testCase "encode 21000000" $
+      encodeMinSigned 21000000 @?= unhex "01406f40"
+  , testCase "encode -21000000" $
+      encodeMinSigned (-21000000) @?= unhex "febf90c0"
+  , testCase "encode 2147483647" $
+      encodeMinSigned 2147483647 @?= unhex "7fffffff"
+  , testCase "encode -2147483648" $
+      encodeMinSigned (-2147483648) @?= unhex "80000000"
+  , testCase "encode 2147483648" $
+      encodeMinSigned 2147483648 @?= unhex "0000000080000000"
+  , testCase "encode -2147483649" $
+      encodeMinSigned (-2147483649) @?= unhex "ffffffff7fffffff"
+  , testCase "encode 500000000000" $
+      encodeMinSigned 500000000000 @?= unhex "000000746a528800"
+  , testCase "encode -500000000000" $
+      encodeMinSigned (-500000000000) @?= unhex "ffffff8b95ad7800"
+  , testCase "encode max int64" $
+      encodeMinSigned 9223372036854775807 @?= unhex "7fffffffffffffff"
+  , testCase "encode min int64" $
+      encodeMinSigned (-9223372036854775808) @?= unhex "8000000000000000"
+  -- Decode tests
+  , testCase "decode 1-byte 42" $
+      decodeMinSigned 1 (unhex "2a") @?= Just (42, "")
+  , testCase "decode 1-byte -42" $
+      decodeMinSigned 1 (unhex "d6") @?= Just (-42, "")
+  , testCase "decode 2-byte 128" $
+      decodeMinSigned 2 (unhex "0080") @?= Just (128, "")
+  , testCase "decode 2-byte -129" $
+      decodeMinSigned 2 (unhex "ff7f") @?= Just (-129, "")
+  , testCase "decode 4-byte 32768" $
+      decodeMinSigned 4 (unhex "00008000") @?= Just (32768, "")
+  , testCase "decode 8-byte 2147483648" $
+      decodeMinSigned 8 (unhex "0000000080000000") @?= Just (2147483648, "")
+  -- Minimality rejection
+  , testCase "decode 2-byte for 1-byte value fails" $
+      decodeMinSigned 2 (unhex "0042") @?= Nothing  -- 42 fits in 1 byte
+  , testCase "decode 4-byte for 2-byte value fails" $
+      decodeMinSigned 4 (unhex "00000080") @?= Nothing  -- 128 fits in 2 bytes
+  , testCase "decode 8-byte for 4-byte value fails" $
+      decodeMinSigned 8 (unhex "0000000000008000") @?= Nothing  -- 32768 fits in 4
   ]
 
 -- TLV tests -------------------------------------------------------------------
@@ -406,6 +569,14 @@ bounds_tests = testGroup "Bounds checking" [
       case encodeMessage (MsgPeerStorageVal msg) of
         Left EncodeLengthOverflow -> pure ()
         other -> assertFailure $ "expected overflow: " ++ show other
+  , testCase "encode envelope exceeding 65535 bytes fails" $ do
+      -- Create a message that fits in encodeMessage but combined with
+      -- extension exceeds 65535 bytes total
+      let msg = MsgPongVal (Pong (BS.replicate 60000 0x00))
+          ext = TlvStream [TlvRecord 101 (BS.replicate 10000 0x00)]
+      case encodeEnvelope msg (Just ext) of
+        Left EncodeMessageTooLarge -> pure ()
+        other -> assertFailure $ "expected message too large: " ++ show other
   ]
 
 -- Property tests --------------------------------------------------------------
