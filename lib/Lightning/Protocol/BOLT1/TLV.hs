@@ -33,6 +33,11 @@ module Lightning.Protocol.BOLT1.TLV (
   , InitTlv(..)
   , parseInitTlvs
   , encodeInitTlvs
+
+  -- * Re-exports
+  , ChainHash
+  , chainHash
+  , unChainHash
   ) where
 
 import Control.DeepSeq (NFData)
@@ -197,7 +202,7 @@ decodeTlvStream = decodeTlvStreamWith isInitTlvType
 
 -- | TLV records for init message.
 data InitTlv
-  = InitNetworks ![BS.ByteString]  -- ^ Type 1: chain hashes (32 bytes each)
+  = InitNetworks ![ChainHash]      -- ^ Type 1: chain hashes (32 bytes each)
   | InitRemoteAddr !BS.ByteString  -- ^ Type 3: remote address
   deriving stock (Eq, Show, Generic)
 
@@ -209,10 +214,17 @@ parseInitTlvs (TlvStream recs) = traverse parseOne recs
   where
     parseOne (TlvRecord 1 val)
       | BS.length val `mod` 32 == 0 =
-          Right (InitNetworks (chunksOf 32 val))
+          Right (InitNetworks (map mkChainHash (chunksOf 32 val)))
       | otherwise = Left (TlvInvalidKnownType 1)
     parseOne (TlvRecord 3 val) = Right (InitRemoteAddr val)
     parseOne (TlvRecord t _) = Left (TlvUnknownEvenType t)
+
+    -- Each chunk is exactly 32 bytes from chunksOf, so chainHash always
+    -- succeeds. We use a partial pattern match as the Nothing case is
+    -- unreachable given our chunksOf guarantee.
+    mkChainHash bs = case chainHash bs of
+      Just ch -> ch
+      Nothing -> error "parseInitTlvs: impossible - chunk is not 32 bytes"
 
 -- | Split bytestring into chunks of given size.
 chunksOf :: Int -> BS.ByteString -> [BS.ByteString]
@@ -227,6 +239,6 @@ encodeInitTlvs :: [InitTlv] -> TlvStream
 encodeInitTlvs = unsafeTlvStream . map toRecord
   where
     toRecord (InitNetworks chains) =
-      TlvRecord 1 (mconcat chains)
+      TlvRecord 1 (mconcat (map unChainHash chains))
     toRecord (InitRemoteAddr addr) =
       TlvRecord 3 addr

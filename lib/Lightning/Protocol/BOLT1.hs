@@ -47,6 +47,9 @@ module Lightning.Protocol.BOLT1 (
 
   -- ** Init TLVs
   , InitTlv(..)
+  , ChainHash
+  , chainHash
+  , unChainHash
 
   -- * Message envelope
   , Envelope(..)
