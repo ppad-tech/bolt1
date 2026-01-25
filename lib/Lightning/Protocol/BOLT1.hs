@@ -52,6 +52,7 @@ module Lightning.Protocol.BOLT1 (
   , DecodeError(..)
   , decodeMessage
   , decodeEnvelope
+  , decodeEnvelopeWith
 
   -- * Primitive encoding
   , encodeU16

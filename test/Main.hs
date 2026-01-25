@@ -645,12 +645,12 @@ property_tests = testGroup "Properties" [
 
 -- Helpers ---------------------------------------------------------------------
 
--- | Decode hex string. Fails the test on invalid hex.
+-- | Decode hex string (test-only helper).
+--
+-- Uses 'error' for invalid hex since all hex literals in tests are
+-- known-valid compile-time constants. This is acceptable in test code
+-- where the failure would indicate a bug in the test itself.
 unhex :: BS.ByteString -> BS.ByteString
 unhex bs = case B16.decode bs of
   Just r  -> r
-  Nothing -> assertFailure' $ "invalid hex: " ++ show bs
-
--- | assertFailure that returns any type (for use in pure contexts)
-assertFailure' :: String -> a
-assertFailure' msg = error msg
+  Nothing -> error $ "unhex: invalid hex literal: " ++ show bs

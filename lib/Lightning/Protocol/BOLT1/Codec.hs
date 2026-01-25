@@ -40,12 +40,13 @@ module Lightning.Protocol.BOLT1.Codec (
   , decodePeerStorageRetrieval
   , decodeMessage
   , decodeEnvelope
+  , decodeEnvelopeWith
   ) where
 
 import Control.DeepSeq (NFData)
 import Control.Monad (when, unless)
 import qualified Data.ByteString as BS
-import Data.Word (Word16)
+import Data.Word (Word16, Word64)
 import GHC.Generics (Generic)
 import Lightning.Protocol.BOLT1.Prim
 import Lightning.Protocol.BOLT1.TLV
@@ -114,15 +115,23 @@ encodePeerStorageRetrieval (PeerStorageRetrieval blob) = do
   Right $ mconcat [blobLen, blob]
 
 -- | Encode a message to its payload bytes.
+--
+-- Checks that the payload does not exceed 65533 bytes (the maximum
+-- possible given the 2-byte type field and 65535-byte message limit).
 encodeMessage :: Message -> Either EncodeError BS.ByteString
-encodeMessage = \case
-  MsgInitVal m                 -> encodeInit m
-  MsgErrorVal m                -> encodeError m
-  MsgWarningVal m              -> encodeWarning m
-  MsgPingVal m                 -> encodePing m
-  MsgPongVal m                 -> encodePong m
-  MsgPeerStorageVal m          -> encodePeerStorage m
-  MsgPeerStorageRetrievalVal m -> encodePeerStorageRetrieval m
+encodeMessage msg = do
+  payload <- case msg of
+    MsgInitVal m                 -> encodeInit m
+    MsgErrorVal m                -> encodeError m
+    MsgWarningVal m              -> encodeWarning m
+    MsgPingVal m                 -> encodePing m
+    MsgPongVal m                 -> encodePong m
+    MsgPeerStorageVal m          -> encodePeerStorage m
+    MsgPeerStorageRetrievalVal m -> encodePeerStorageRetrieval m
+  -- Payload must leave room for 2-byte type (max 65533 bytes)
+  when (BS.length payload > 65533) $
+    Left EncodeMessageTooLarge
+  Right payload
 
 -- | Encode a message as a complete envelope (type + payload + extension).
 --
@@ -296,11 +305,30 @@ decodeMessage (MsgUnknown w) _
 -- - Unknown even message types cause connection close (returns error)
 -- - Invalid extension TLV causes connection close (returns error)
 --
+-- This uses the default policy of treating all extension TLV types as
+-- unknown. Use 'decodeEnvelopeWith' for configurable extension handling.
+--
 -- Returns the decoded message (if known) and any extension TLVs.
 decodeEnvelope
   :: BS.ByteString
   -> Either DecodeError (Maybe Message, Maybe TlvStream)
-decodeEnvelope !bs = do
+decodeEnvelope = decodeEnvelopeWith (const False)
+
+-- | Decode a complete envelope with configurable extension TLV handling.
+--
+-- The predicate determines which extension TLV types are "known" and
+-- should be preserved. Unknown even types cause failure; unknown odd
+-- types are skipped.
+--
+-- Use @decodeEnvelopeWith (const False)@ to reject all even extension
+-- types (the default behavior of 'decodeEnvelope').
+--
+-- Use @decodeEnvelopeWith (const True)@ to accept all extension types.
+decodeEnvelopeWith
+  :: (Word64 -> Bool)  -- ^ Predicate: is this extension TLV type known?
+  -> BS.ByteString
+  -> Either DecodeError (Maybe Message, Maybe TlvStream)
+decodeEnvelopeWith isKnownExt !bs = do
   (typeWord, rest1) <- maybe (Left DecodeInsufficientBytes) Right
                          (decodeU16 bs)
   let !msgType = parseMsgType typeWord
@@ -311,10 +339,9 @@ decodeEnvelope !bs = do
     _ -> do
       (msg, rest2) <- decodeMessage msgType rest1
       -- Parse any remaining bytes as extension TLV
-      -- Per BOLT #1: unknown even types must fail, unknown odd are ignored
       ext <- if BS.null rest2
         then Right Nothing
-        else case decodeTlvStreamWith (const False) rest2 of
+        else case decodeTlvStreamWith isKnownExt rest2 of
           Left e  -> Left (DecodeInvalidExtension e)
           Right s -> Right (Just s)
       Right (Just msg, ext)
