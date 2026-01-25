@@ -1,5 +1,7 @@
 {-# OPTIONS_HADDOCK prune #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
 
 -- |
 -- Module: Lightning.Protocol.BOLT1.Prim
@@ -10,8 +12,13 @@
 -- Primitive type encoding and decoding for BOLT #1.
 
 module Lightning.Protocol.BOLT1.Prim (
+  -- * Chain hash
+    ChainHash
+  , chainHash
+  , unChainHash
+
   -- * Unsigned integer encoding
-    encodeU16
+  , encodeU16
   , encodeU32
   , encodeU64
 
@@ -58,12 +65,36 @@ module Lightning.Protocol.BOLT1.Prim (
   , encodeLength
   ) where
 
+import Control.DeepSeq (NFData)
 import Data.Bits (unsafeShiftL, unsafeShiftR, (.|.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB
 import qualified Data.ByteString.Lazy as BSL
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Word (Word16, Word32, Word64)
+import GHC.Generics (Generic)
+
+-- Chain hash ------------------------------------------------------------------
+
+-- | A chain hash (32-byte hash identifying a blockchain).
+newtype ChainHash = ChainHash BS.ByteString
+  deriving stock (Eq, Show, Generic)
+
+instance NFData ChainHash
+
+-- | Construct a chain hash from a 32-byte bytestring.
+--
+-- Returns 'Nothing' if the input is not exactly 32 bytes.
+chainHash :: BS.ByteString -> Maybe ChainHash
+chainHash bs
+  | BS.length bs == 32 = Just (ChainHash bs)
+  | otherwise = Nothing
+{-# INLINE chainHash #-}
+
+-- | Extract the raw bytes from a chain hash.
+unChainHash :: ChainHash -> BS.ByteString
+unChainHash (ChainHash bs) = bs
+{-# INLINE unChainHash #-}
 
 -- Unsigned integer encoding ---------------------------------------------------
 

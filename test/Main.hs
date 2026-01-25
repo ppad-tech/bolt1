@@ -356,8 +356,8 @@ message_tests = testGroup "Messages" [
             Right (MsgInitVal decoded, _) -> decoded @?= msg
             other -> assertFailure $ "unexpected: " ++ show other
     , testCase "encode/decode init with networks TLV" $ do
-        let chainHash = BS.replicate 32 0xab
-            msg = Init "" "" [InitNetworks [chainHash]]
+        let ch = unsafeChainHash (BS.replicate 32 0xab)
+            msg = Init "" "" [InitNetworks [ch]]
         case encodeMessage (MsgInitVal msg) of
           Left e -> assertFailure $ "encode failed: " ++ show e
           Right encoded -> case decodeMessage MsgInit encoded of
@@ -654,3 +654,13 @@ unhex :: BS.ByteString -> BS.ByteString
 unhex bs = case B16.decode bs of
   Just r  -> r
   Nothing -> error $ "unhex: invalid hex literal: " ++ show bs
+
+-- | Construct a ChainHash from a bytestring (test-only helper).
+--
+-- Uses 'error' for invalid input since all chain hashes in tests are
+-- known-valid 32-byte constants. This is acceptable in test code where
+-- the failure would indicate a bug in the test itself.
+unsafeChainHash :: BS.ByteString -> ChainHash
+unsafeChainHash bs = case chainHash bs of
+  Just c  -> c
+  Nothing -> error $ "unsafeChainHash: not 32 bytes: " ++ show (BS.length bs)
