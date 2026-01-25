@@ -30,7 +30,10 @@ module Lightning.Protocol.BOLT1 (
 
   -- * TLV
   , TlvRecord(..)
-  , TlvStream(..)
+  , TlvStream
+  , unTlvStream
+  , tlvStream
+  , unsafeTlvStream
   , TlvError(..)
   , encodeTlvStream
   , decodeTlvStream

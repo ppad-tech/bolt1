@@ -14,7 +14,10 @@
 module Lightning.Protocol.BOLT1.TLV (
   -- * TLV types
     TlvRecord(..)
-  , TlvStream(..)
+  , TlvStream
+  , unTlvStream
+  , tlvStream
+  , unsafeTlvStream
   , TlvError(..)
 
   -- * TLV encoding
@@ -54,6 +57,26 @@ newtype TlvStream = TlvStream { unTlvStream :: [TlvRecord] }
   deriving stock (Eq, Show, Generic)
 
 instance NFData TlvStream
+
+-- | Smart constructor for 'TlvStream' that validates records are
+-- strictly increasing by type.
+--
+-- Returns 'Nothing' if types are not strictly increasing.
+tlvStream :: [TlvRecord] -> Maybe TlvStream
+tlvStream recs
+  | isStrictlyIncreasing (map tlvType recs) = Just (TlvStream recs)
+  | otherwise = Nothing
+  where
+    isStrictlyIncreasing :: [Word64] -> Bool
+    isStrictlyIncreasing [] = True
+    isStrictlyIncreasing [_] = True
+    isStrictlyIncreasing (x:y:rest) = x < y && isStrictlyIncreasing (y:rest)
+
+-- | Unsafe constructor for 'TlvStream' that skips validation.
+--
+-- Use only when ordering is already guaranteed (e.g., in decode functions).
+unsafeTlvStream :: [TlvRecord] -> TlvStream
+unsafeTlvStream = TlvStream
 
 -- | TLV decoding errors.
 data TlvError
@@ -97,7 +120,7 @@ decodeTlvStreamRaw = go Nothing []
     go :: Maybe Word64 -> [TlvRecord] -> BS.ByteString
        -> Either TlvError TlvStream
     go !_ !acc !bs
-      | BS.null bs = Right (TlvStream (reverse acc))
+      | BS.null bs = Right (unsafeTlvStream (reverse acc))
     go !mPrevType !acc !bs = do
       (typ, rest1) <- maybe (Left TlvNonMinimalEncoding) Right
                         (decodeBigSize bs)
@@ -133,7 +156,7 @@ decodeTlvStreamWith isKnown = go Nothing []
     go :: Maybe Word64 -> [TlvRecord] -> BS.ByteString
        -> Either TlvError TlvStream
     go !_ !acc !bs
-      | BS.null bs = Right (TlvStream (reverse acc))
+      | BS.null bs = Right (unsafeTlvStream (reverse acc))
     go !mPrevType !acc !bs = do
       (typ, rest1) <- maybe (Left TlvNonMinimalEncoding) Right
                         (decodeBigSize bs)
@@ -201,7 +224,7 @@ chunksOf !n !bs
 
 -- | Encode init TLVs to a TLV stream.
 encodeInitTlvs :: [InitTlv] -> TlvStream
-encodeInitTlvs = TlvStream . map toRecord
+encodeInitTlvs = unsafeTlvStream . map toRecord
   where
     toRecord (InitNetworks chains) =
       TlvRecord 1 (mconcat chains)
