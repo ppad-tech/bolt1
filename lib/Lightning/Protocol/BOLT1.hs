@@ -250,8 +250,9 @@ instance NFData TlvError
 -- - Types must be strictly increasing
 -- - Lengths must not exceed bounds
 --
--- All records are returned regardless of type. Use this for parsing
--- extension TLVs or when you want to handle type validation separately.
+-- All records are returned regardless of type. Note: this does NOT
+-- enforce the BOLT #1 unknown-even-type rule. Use 'decodeTlvStreamWith'
+-- with an appropriate predicate for spec-compliant parsing.
 decodeTlvStreamRaw :: BS.ByteString -> Either TlvError TlvStream
 decodeTlvStreamRaw = go Nothing []
   where
@@ -748,9 +749,10 @@ decodeEnvelope !bs = do
     _ -> do
       (msg, rest2) <- decodeMessage msgType rest1
       -- Parse any remaining bytes as extension TLV
+      -- Per BOLT #1: unknown even types must fail, unknown odd are ignored
       ext <- if BS.null rest2
         then Right Nothing
-        else case decodeTlvStreamRaw rest2 of
+        else case decodeTlvStreamWith (const False) rest2 of
           Left e  -> Left (DecodeInvalidExtension e)
           Right s -> Right (Just s)
       Right (Just msg, ext)
