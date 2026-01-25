@@ -81,13 +81,13 @@ encodeInit (Init gf feat tlvs) = do
 encodeError :: Error -> Either EncodeError BS.ByteString
 encodeError (Error cid dat) = do
   datLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength dat)
-  Right $ mconcat [cid, datLen, dat]
+  Right $ mconcat [unChannelId cid, datLen, dat]
 
 -- | Encode a Warning message payload.
 encodeWarning :: Warning -> Either EncodeError BS.ByteString
 encodeWarning (Warning cid dat) = do
   datLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength dat)
-  Right $ mconcat [cid, datLen, dat]
+  Right $ mconcat [unChannelId cid, datLen, dat]
 
 -- | Encode a Ping message payload.
 encodePing :: Ping -> Either EncodeError BS.ByteString
@@ -194,8 +194,9 @@ decodeInit !bs = do
 decodeError :: BS.ByteString -> Either DecodeError (Error, BS.ByteString)
 decodeError !bs = do
   unless (BS.length bs >= 32) $ Left DecodeInsufficientBytes
-  let !cid = BS.take 32 bs
+  let !cidBytes = BS.take 32 bs
       !rest1 = BS.drop 32 bs
+  cid <- maybe (Left DecodeInvalidChannelId) Right (channelId cidBytes)
   (dLen, rest2) <- maybe (Left DecodeInsufficientBytes) Right
                      (decodeU16 rest1)
   unless (BS.length rest2 >= fromIntegral dLen) $
@@ -208,8 +209,9 @@ decodeError !bs = do
 decodeWarning :: BS.ByteString -> Either DecodeError (Warning, BS.ByteString)
 decodeWarning !bs = do
   unless (BS.length bs >= 32) $ Left DecodeInsufficientBytes
-  let !cid = BS.take 32 bs
+  let !cidBytes = BS.take 32 bs
       !rest1 = BS.drop 32 bs
+  cid <- maybe (Left DecodeInvalidChannelId) Right (channelId cidBytes)
   (dLen, rest2) <- maybe (Left DecodeInsufficientBytes) Right
                      (decodeU16 rest1)
   unless (BS.length rest2 >= fromIntegral dLen) $

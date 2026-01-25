@@ -366,7 +366,7 @@ message_tests = testGroup "Messages" [
     ]
   , testGroup "Error" [
       testCase "encode/decode error" $ do
-        let cid = BS.replicate 32 0xff
+        let cid = unsafeChannelId (BS.replicate 32 0xff)
             msg = Error cid "something went wrong"
         case encodeMessage (MsgErrorVal msg) of
           Left e -> assertFailure $ "encode failed: " ++ show e
@@ -380,7 +380,7 @@ message_tests = testGroup "Messages" [
     ]
   , testGroup "Warning" [
       testCase "encode/decode warning" $ do
-        let cid = BS.replicate 32 0x00
+        let cid = unsafeChannelId (BS.replicate 32 0x00)
             msg = Warning cid "be careful"
         case encodeMessage (MsgWarningVal msg) of
           Left e -> assertFailure $ "encode failed: " ++ show e
@@ -555,7 +555,8 @@ bounds_tests = testGroup "Bounds checking" [
         Left EncodeLengthOverflow -> pure ()
         other -> assertFailure $ "expected overflow: " ++ show other
   , testCase "encode error with oversized data fails" $ do
-      let msg = Error (BS.replicate 32 0x00) (BS.replicate 70000 0x00)
+      let cid = unsafeChannelId (BS.replicate 32 0x00)
+          msg = Error cid (BS.replicate 70000 0x00)
       case encodeMessage (MsgErrorVal msg) of
         Left EncodeLengthOverflow -> pure ()
         other -> assertFailure $ "expected overflow: " ++ show other
@@ -621,7 +622,7 @@ property_tests = testGroup "Properties" [
                decoded == msg && BS.null rest
              _ -> False
   , testProperty "Error roundtrip" $ \bs ->
-      let cid = BS.replicate 32 0x00
+      let cid = unsafeChannelId (BS.replicate 32 0x00)
           dat = BS.pack (take 1000 bs)
           msg = Error cid dat
       in case encodeMessage (MsgErrorVal msg) of
@@ -644,6 +645,15 @@ property_tests = testGroup "Properties" [
   ]
 
 -- Helpers ---------------------------------------------------------------------
+
+-- | Construct a 'ChannelId' from a known-valid 32-byte 'BS.ByteString'.
+--
+-- Uses 'error' for invalid input since all channel IDs in tests are
+-- known-valid compile-time constants.
+unsafeChannelId :: BS.ByteString -> ChannelId
+unsafeChannelId bs = case channelId bs of
+  Just cid -> cid
+  Nothing  -> error $ "unsafeChannelId: invalid length: " ++ show (BS.length bs)
 
 -- | Decode hex string (test-only helper).
 --
