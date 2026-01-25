@@ -28,6 +28,7 @@ library
   build-depends:
       base >= 4.9 && < 5
     , bytestring >= 0.9 && < 0.13
+    , deepseq >= 1.4 && < 1.6
 
 test-suite bolt1-tests
   type:                exitcode-stdio-1.0
@@ -45,6 +46,7 @@ test-suite bolt1-tests
     , ppad-bolt1
     , tasty
     , tasty-hunit
+    , tasty-quickcheck
 
 benchmark bolt1-bench
   type:                exitcode-stdio-1.0
