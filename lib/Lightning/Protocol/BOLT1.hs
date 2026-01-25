@@ -15,6 +15,11 @@ module Lightning.Protocol.BOLT1 (
   , MsgType(..)
   , msgTypeWord
 
+  -- * Channel identifiers
+  , ChannelId
+  , channelId
+  , allChannels
+
   -- ** Setup messages
   , Init(..)
   , Error(..)
