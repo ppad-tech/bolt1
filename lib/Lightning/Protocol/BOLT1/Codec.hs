@@ -182,11 +182,11 @@ decodeInit !bs = do
   let !feat = BS.take (fromIntegral fLen) rest3
       !rest4 = BS.drop (fromIntegral fLen) rest3
   -- Parse optional TLV stream (consumes all remaining bytes for init)
-  tlvStream <- if BS.null rest4
-    then Right (TlvStream [])
+  tlvs <- if BS.null rest4
+    then Right (unsafeTlvStream [])
     else either (Left . DecodeTlvError) Right (decodeTlvStream rest4)
   initTlvList <- either (Left . DecodeTlvError) Right
-                   (parseInitTlvs tlvStream)
+                   (parseInitTlvs tlvs)
   -- Init consumes all bytes (TLVs are part of init, not extensions)
   Right (Init gf feat initTlvList, BS.empty)
 
