@@ -45,9 +45,8 @@ $ cabal bench
 
 ## Security
 
-This library targets safe, validated parsing of Lightning BOLT #1
-messages. If you discover any vulnerabilities, please disclose them via
-security@ppad.tech.
+This is a pre-release library that, at present, claims no security
+properties whatsoever.
 
 ## Development
 
