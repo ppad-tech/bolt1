@@ -2,6 +2,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 -- |
 -- Module: Lightning.Protocol.BOLT1.Prim
@@ -13,9 +14,50 @@
 
 module Lightning.Protocol.BOLT1.Prim (
   -- * Chain hash
-    ChainHash
+    ChainHash(..)
   , chainHash
   , unChainHash
+
+  -- * Channel identifier
+  , ChannelId(..)
+  , channelId
+  , unChannelId
+  , allChannels
+
+  -- * Signatures and keys
+  , Signature(..)
+  , signature
+  , unSignature
+  , Point(..)
+  , point
+  , unPoint
+
+  -- * Payment types
+  , PaymentHash(..)
+  , paymentHash
+  , unPaymentHash
+  , PaymentPreimage(..)
+  , paymentPreimage
+  , unPaymentPreimage
+
+  -- * Per-commitment secret
+  , PerCommitmentSecret(..)
+  , perCommitmentSecret
+  , unPerCommitmentSecret
+
+  -- * Short channel identifier
+  , ShortChannelId(..)
+  , shortChannelId
+  , scidWord64
+  , scidBlockHeight
+  , scidTxIndex
+  , scidOutputIndex
+
+  -- * Amounts
+  , Satoshi(..)
+  , MilliSatoshi(..)
+  , satToMsat
+  , msatToSat
 
   -- * Unsigned integer encoding
   , encodeU16
@@ -66,7 +108,7 @@ module Lightning.Protocol.BOLT1.Prim (
   ) where
 
 import Control.DeepSeq (NFData)
-import Data.Bits (unsafeShiftL, unsafeShiftR, (.|.))
+import Data.Bits (unsafeShiftL, unsafeShiftR, (.&.), (.|.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB
 import qualified Data.ByteString.Lazy as BSL
@@ -78,7 +120,7 @@ import GHC.Generics (Generic)
 
 -- | A chain hash (32-byte hash identifying a blockchain).
 newtype ChainHash = ChainHash BS.ByteString
-  deriving stock (Eq, Show, Generic)
+  deriving stock (Eq, Ord, Show, Generic)
 
 instance NFData ChainHash
 
@@ -95,6 +137,220 @@ chainHash bs
 unChainHash :: ChainHash -> BS.ByteString
 unChainHash (ChainHash bs) = bs
 {-# INLINE unChainHash #-}
+
+-- Channel identifier ---------------------------------------------------------
+
+-- | A 32-byte channel identifier.
+newtype ChannelId = ChannelId BS.ByteString
+  deriving stock (Eq, Ord, Show, Generic)
+
+instance NFData ChannelId
+
+-- | Construct a 'ChannelId' from a 32-byte 'BS.ByteString'.
+--
+-- Returns 'Nothing' if the input is not exactly 32 bytes.
+channelId :: BS.ByteString -> Maybe ChannelId
+channelId bs
+  | BS.length bs == 32 = Just (ChannelId bs)
+  | otherwise          = Nothing
+{-# INLINE channelId #-}
+
+-- | Extract the raw bytes from a 'ChannelId'.
+unChannelId :: ChannelId -> BS.ByteString
+unChannelId (ChannelId bs) = bs
+{-# INLINE unChannelId #-}
+
+-- | The all-zeros channel ID (connection-level errors).
+allChannels :: ChannelId
+allChannels = ChannelId (BS.replicate 32 0x00)
+
+-- Signatures and keys --------------------------------------------------------
+
+-- | A 64-byte compact ECDSA signature.
+newtype Signature = Signature BS.ByteString
+  deriving stock (Eq, Ord, Show, Generic)
+
+instance NFData Signature
+
+-- | Construct a 'Signature' from a 64-byte 'BS.ByteString'.
+--
+-- Returns 'Nothing' if the input is not exactly 64 bytes.
+signature :: BS.ByteString -> Maybe Signature
+signature !bs
+  | BS.length bs == 64 = Just (Signature bs)
+  | otherwise          = Nothing
+{-# INLINE signature #-}
+
+-- | Extract the raw bytes from a 'Signature'.
+unSignature :: Signature -> BS.ByteString
+unSignature (Signature bs) = bs
+{-# INLINE unSignature #-}
+
+-- | A 33-byte compressed secp256k1 public key.
+newtype Point = Point BS.ByteString
+  deriving stock (Eq, Ord, Show, Generic)
+
+instance NFData Point
+
+-- | Construct a 'Point' from a 33-byte 'BS.ByteString'.
+--
+-- Returns 'Nothing' if the input is not exactly 33 bytes.
+point :: BS.ByteString -> Maybe Point
+point !bs
+  | BS.length bs == 33 = Just (Point bs)
+  | otherwise          = Nothing
+{-# INLINE point #-}
+
+-- | Extract the raw bytes from a 'Point'.
+unPoint :: Point -> BS.ByteString
+unPoint (Point bs) = bs
+{-# INLINE unPoint #-}
+
+-- Payment types --------------------------------------------------------------
+
+-- | A 32-byte SHA256 payment hash.
+newtype PaymentHash = PaymentHash BS.ByteString
+  deriving stock (Eq, Ord, Show, Generic)
+
+instance NFData PaymentHash
+
+-- | Construct a 'PaymentHash' from a 32-byte 'BS.ByteString'.
+--
+-- Returns 'Nothing' if the input is not exactly 32 bytes.
+paymentHash :: BS.ByteString -> Maybe PaymentHash
+paymentHash !bs
+  | BS.length bs == 32 = Just (PaymentHash bs)
+  | otherwise          = Nothing
+{-# INLINE paymentHash #-}
+
+-- | Extract the raw bytes from a 'PaymentHash'.
+unPaymentHash :: PaymentHash -> BS.ByteString
+unPaymentHash (PaymentHash bs) = bs
+{-# INLINE unPaymentHash #-}
+
+-- | A 32-byte payment preimage.
+newtype PaymentPreimage = PaymentPreimage BS.ByteString
+  deriving stock (Eq, Ord, Generic)
+
+instance NFData PaymentPreimage
+
+instance Show PaymentPreimage where
+  show _ = "PaymentPreimage <redacted>"
+
+-- | Construct a 'PaymentPreimage' from a 32-byte 'BS.ByteString'.
+--
+-- Returns 'Nothing' if the input is not exactly 32 bytes.
+paymentPreimage :: BS.ByteString -> Maybe PaymentPreimage
+paymentPreimage !bs
+  | BS.length bs == 32 = Just (PaymentPreimage bs)
+  | otherwise          = Nothing
+{-# INLINE paymentPreimage #-}
+
+-- | Extract the raw bytes from a 'PaymentPreimage'.
+unPaymentPreimage :: PaymentPreimage -> BS.ByteString
+unPaymentPreimage (PaymentPreimage bs) = bs
+{-# INLINE unPaymentPreimage #-}
+
+-- Per-commitment secret ------------------------------------------------------
+
+-- | A 32-byte per-commitment secret.
+newtype PerCommitmentSecret = PerCommitmentSecret BS.ByteString
+  deriving stock (Eq, Ord, Generic)
+
+instance NFData PerCommitmentSecret
+
+instance Show PerCommitmentSecret where
+  show _ = "PerCommitmentSecret <redacted>"
+
+-- | Construct a 'PerCommitmentSecret' from a 32-byte
+-- 'BS.ByteString'.
+--
+-- Returns 'Nothing' if the input is not exactly 32 bytes.
+perCommitmentSecret :: BS.ByteString -> Maybe PerCommitmentSecret
+perCommitmentSecret !bs
+  | BS.length bs == 32 = Just (PerCommitmentSecret bs)
+  | otherwise          = Nothing
+{-# INLINE perCommitmentSecret #-}
+
+-- | Extract the raw bytes from a 'PerCommitmentSecret'.
+unPerCommitmentSecret :: PerCommitmentSecret -> BS.ByteString
+unPerCommitmentSecret (PerCommitmentSecret bs) = bs
+{-# INLINE unPerCommitmentSecret #-}
+
+-- Short channel identifier ---------------------------------------------------
+
+-- | A short channel identifier (8 bytes packed as 'Word64').
+--
+-- Encodes block height (3 bytes), transaction index (3 bytes),
+-- and output index (2 bytes).
+newtype ShortChannelId = ShortChannelId Word64
+  deriving stock (Eq, Ord, Show, Generic)
+
+instance NFData ShortChannelId
+
+-- | Construct a 'ShortChannelId' from components.
+--
+-- Returns 'Nothing' if block height or tx index exceed 24 bits.
+shortChannelId
+  :: Word32  -- ^ Block height (24 bits max)
+  -> Word32  -- ^ Transaction index (24 bits max)
+  -> Word16  -- ^ Output index
+  -> Maybe ShortChannelId
+shortChannelId !blockHeight !txIndex !outputIndex
+  | blockHeight > 0xFFFFFF = Nothing
+  | txIndex > 0xFFFFFF     = Nothing
+  | otherwise              = Just $! ShortChannelId w
+  where
+    !w = (fromIntegral blockHeight `unsafeShiftL` 40)
+     .|. (fromIntegral txIndex `unsafeShiftL` 16)
+     .|. fromIntegral outputIndex
+{-# INLINE shortChannelId #-}
+
+-- | Extract the packed 'Word64' from a 'ShortChannelId'.
+scidWord64 :: ShortChannelId -> Word64
+scidWord64 (ShortChannelId w) = w
+{-# INLINE scidWord64 #-}
+
+-- | Extract the block height from a 'ShortChannelId'.
+scidBlockHeight :: ShortChannelId -> Word32
+scidBlockHeight (ShortChannelId !w) =
+  fromIntegral $! (w `unsafeShiftR` 40) .&. 0xFFFFFF
+{-# INLINE scidBlockHeight #-}
+
+-- | Extract the transaction index from a 'ShortChannelId'.
+scidTxIndex :: ShortChannelId -> Word32
+scidTxIndex (ShortChannelId !w) =
+  fromIntegral $! (w `unsafeShiftR` 16) .&. 0xFFFFFF
+{-# INLINE scidTxIndex #-}
+
+-- | Extract the output index from a 'ShortChannelId'.
+scidOutputIndex :: ShortChannelId -> Word16
+scidOutputIndex (ShortChannelId !w) =
+  fromIntegral $! w .&. 0xFFFF
+{-# INLINE scidOutputIndex #-}
+
+-- Amounts --------------------------------------------------------------------
+
+-- | Amount in satoshis.
+newtype Satoshi = Satoshi { unSatoshi :: Word64 }
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving newtype (NFData, Num, Enum, Real, Integral)
+
+-- | Amount in millisatoshis.
+newtype MilliSatoshi = MilliSatoshi
+  { unMilliSatoshi :: Word64 }
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving newtype (NFData, Num, Enum, Real, Integral)
+
+-- | Convert 'Satoshi' to 'MilliSatoshi'.
+satToMsat :: Satoshi -> MilliSatoshi
+satToMsat (Satoshi !s) = MilliSatoshi $! s * 1000
+{-# INLINE satToMsat #-}
+
+-- | Convert 'MilliSatoshi' to 'Satoshi' (rounds down).
+msatToSat :: MilliSatoshi -> Satoshi
+msatToSat (MilliSatoshi !m) = Satoshi $! m `div` 1000
+{-# INLINE msatToSat #-}
 
 -- Unsigned integer encoding ---------------------------------------------------
 

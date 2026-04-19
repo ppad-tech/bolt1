@@ -16,9 +16,45 @@ module Lightning.Protocol.BOLT1 (
   , msgTypeWord
 
   -- * Channel identifiers
-  , ChannelId
+  , ChannelId(..)
   , channelId
+  , unChannelId
   , allChannels
+
+  -- * Signatures and keys
+  , Signature(..)
+  , signature
+  , unSignature
+  , Point(..)
+  , point
+  , unPoint
+
+  -- * Payment types
+  , PaymentHash(..)
+  , paymentHash
+  , unPaymentHash
+  , PaymentPreimage(..)
+  , paymentPreimage
+  , unPaymentPreimage
+
+  -- * Per-commitment secret
+  , PerCommitmentSecret(..)
+  , perCommitmentSecret
+  , unPerCommitmentSecret
+
+  -- * Short channel identifier
+  , ShortChannelId(..)
+  , shortChannelId
+  , scidWord64
+  , scidBlockHeight
+  , scidTxIndex
+  , scidOutputIndex
+
+  -- * Amounts
+  , Satoshi(..)
+  , MilliSatoshi(..)
+  , satToMsat
+  , msatToSat
 
   -- ** Setup messages
   , Init(..)
@@ -47,7 +83,7 @@ module Lightning.Protocol.BOLT1 (
 
   -- ** Init TLVs
   , InitTlv(..)
-  , ChainHash
+  , ChainHash(..)
   , chainHash
   , unChainHash
 
