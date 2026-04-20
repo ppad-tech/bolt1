@@ -4,6 +4,7 @@ module Main where
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
+import Data.Word (Word64)
 import Lightning.Protocol.BOLT1
 import Lightning.Protocol.BOLT1.Internal
   (unsafeChannelId, unsafeChainHash, unsafeMsgUnknown)
@@ -619,8 +620,9 @@ property_tests = testGroup "Properties" [
   , testProperty "U64 roundtrip" $ \w ->
       decodeU64 (encodeU64 w) == Just (w, "")
   , testProperty "Ping roundtrip" $ \(NonNegative num) bs ->
-      let ignored = BS.pack (take 1000 bs)  -- limit size
-          msg = Ping (fromIntegral (num `mod` 65536 :: Integer)) ignored
+      let ignored = BS.pack (take 1000 bs)
+          msg = Ping (fromIntegral
+            (num `mod` 65536 :: Integer)) ignored
       in case encodeMessage (MsgPingVal msg) of
            Left _ -> False
            Right encoded -> case decodeMessage MsgPing encoded of
@@ -641,33 +643,76 @@ property_tests = testGroup "Properties" [
           msg = PeerStorage blob
       in case encodeMessage (MsgPeerStorageVal msg) of
            Left _ -> False
-           Right encoded -> case decodeMessage MsgPeerStorage encoded of
-             Right (MsgPeerStorageVal decoded, rest) ->
-               decoded == msg && BS.null rest
-             _ -> False
+           Right encoded ->
+             case decodeMessage MsgPeerStorage encoded of
+               Right (MsgPeerStorageVal decoded, rest) ->
+                 decoded == msg && BS.null rest
+               _ -> False
   , testProperty "Error roundtrip" $ \bs ->
       let cid = unsafeChannelId (BS.replicate 32 0x00)
           dat = BS.pack (take 1000 bs)
           msg = Error cid dat
       in case encodeMessage (MsgErrorVal msg) of
            Left _ -> False
-           Right encoded -> case decodeMessage MsgError encoded of
-             Right (MsgErrorVal decoded, rest) ->
-               decoded == msg && BS.null rest
-             _ -> False
-  , testProperty "Envelope with odd extension (skipped per BOLT#1)" $ \bs ->
-      -- Unknown odd types in extensions are skipped per BOLT #1
+           Right encoded ->
+             case decodeMessage MsgError encoded of
+               Right (MsgErrorVal decoded, rest) ->
+                 decoded == msg && BS.null rest
+               _ -> False
+  , testProperty "Envelope with odd extension" $ \bs ->
       let msg = MsgPingVal (Ping 42 "")
           extData = BS.pack (take 100 bs)
-          ext = unsafeTlvStream [TlvRecord 101 extData]  -- odd type, skipped
+          ext = unsafeTlvStream
+            [TlvRecord 101 extData]
       in case encodeEnvelope msg (Just ext) of
            Left _ -> False
            Right encoded -> case decodeEnvelope encoded of
-             -- Extension should be empty (odd types skipped)
              Right (Just decoded, Just stream) ->
-               null (unTlvStream stream) && decoded == msg
+               null (unTlvStream stream)
+               && decoded == msg
              _ -> False
+  , testProperty "MinSigned roundtrip" $ \v ->
+      let encoded = encodeMinSigned v
+          len = BS.length encoded
+      in case decodeMinSigned len encoded of
+        Just (decoded, rest) ->
+          decoded == v && BS.null rest
+        Nothing -> False
+  , testProperty "ShortChannelId component roundtrip" $
+      forAll (choose (0, 0xFFFFFF)) $ \bh ->
+      forAll (choose (0, 0xFFFFFF)) $ \ti ->
+      forAll arbitrary $ \oi ->
+        case shortChannelId bh ti oi of
+          Nothing -> False
+          Just scid ->
+            scidBlockHeight scid == bh
+            && scidTxIndex scid == ti
+            && scidOutputIndex scid == oi
+  , testProperty "TLV stream enforces strict ordering" $
+      forAll (listOf (choose (0, 1000))) $ \types ->
+        case tlvStream (map (\t -> TlvRecord t "") types) of
+          Just stream ->
+            isStrictlyIncreasing
+              (map tlvType (unTlvStream stream))
+          Nothing ->
+            not (isStrictlyIncreasing types)
+  , testProperty "satToMsat/msatToSat roundtrip" $
+      forAll (choose (0, maxSafe)) $ \w ->
+        let s = Satoshi w
+        in msatToSat (satToMsat s) == s
   ]
+
+-- | Check that a list is strictly increasing.
+isStrictlyIncreasing :: Ord a => [a] -> Bool
+isStrictlyIncreasing [] = True
+isStrictlyIncreasing [_] = True
+isStrictlyIncreasing (x:y:rest) =
+  x < y && isStrictlyIncreasing (y : rest)
+
+-- | Maximum Satoshi value that won't overflow Word64 when
+--   multiplied by 1000 in satToMsat.
+maxSafe :: Word64
+maxSafe = maxBound `div` 1000
 
 -- Helpers ---------------------------------------------------------------------
 
