@@ -13,6 +13,7 @@
 module Lightning.Protocol.BOLT1.Message (
   -- * Message types
     MsgType(..)
+  , msgUnknown
   , msgTypeWord
   , parseMsgType
 
@@ -39,6 +40,7 @@ module Lightning.Protocol.BOLT1.Message (
   , Message(..)
   , messageType
   , Envelope(..)
+  , envelope
   ) where
 
 import Control.DeepSeq (NFData)
@@ -86,6 +88,15 @@ parseMsgType 1  = MsgWarning
 parseMsgType 7  = MsgPeerStorage
 parseMsgType 9  = MsgPeerStorageRet
 parseMsgType w  = MsgUnknown w
+
+-- | Smart constructor for unknown message types.
+--
+-- Returns the appropriate known constructor for known
+-- type codes (16, 17, 18, 19, 1, 7, 9) and only uses
+-- 'MsgUnknown' for truly unknown codes.
+msgUnknown :: Word16 -> MsgType
+msgUnknown = parseMsgType
+{-# INLINE msgUnknown #-}
 
 -- Message ADTs ----------------------------------------------------------------
 
@@ -168,7 +179,8 @@ messageType (MsgPeerStorageRetrievalVal _) = MsgPeerStorageRet
 
 -- Message envelope ------------------------------------------------------------
 
--- | A complete message envelope with type, payload, and optional extension.
+-- | A complete message envelope with type, payload,
+-- and optional extension.
 data Envelope = Envelope
   { envType      :: !MsgType
   , envPayload   :: !BS.ByteString
@@ -176,3 +188,14 @@ data Envelope = Envelope
   } deriving stock (Eq, Show, Generic)
 
 instance NFData Envelope
+
+-- | Construct an 'Envelope' from a 'Message' and optional
+-- extension TLV stream. The 'envType' is derived
+-- automatically from the 'Message'.
+envelope :: Message -> Maybe TlvStream -> Envelope
+envelope msg mext = Envelope
+  { envType      = messageType msg
+  , envPayload   = BS.empty
+  , envExtension = mext
+  }
+{-# INLINE envelope #-}

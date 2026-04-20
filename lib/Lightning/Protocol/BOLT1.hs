@@ -12,7 +12,16 @@
 module Lightning.Protocol.BOLT1 (
   -- * Message types
     Message(..)
-  , MsgType(..)
+  , MsgType(
+      MsgInit
+    , MsgError
+    , MsgPing
+    , MsgPong
+    , MsgWarning
+    , MsgPeerStorage
+    , MsgPeerStorageRet
+    )
+  , msgUnknown
   , msgTypeWord
 
   -- * Channel identifiers
@@ -88,7 +97,11 @@ module Lightning.Protocol.BOLT1 (
   , unChainHash
 
   -- * Message envelope
-  , Envelope(..)
+  , Envelope
+  , envelope
+  , envType
+  , envPayload
+  , envExtension
 
   -- * Encoding
   , EncodeError(..)

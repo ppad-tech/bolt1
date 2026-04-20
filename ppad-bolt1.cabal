@@ -26,6 +26,7 @@ library
   exposed-modules:
       Lightning.Protocol.BOLT1
       Lightning.Protocol.BOLT1.Codec
+      Lightning.Protocol.BOLT1.Internal
       Lightning.Protocol.BOLT1.Message
       Lightning.Protocol.BOLT1.Prim
       Lightning.Protocol.BOLT1.TLV

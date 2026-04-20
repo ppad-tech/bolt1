@@ -5,6 +5,8 @@ module Main where
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
 import Lightning.Protocol.BOLT1
+import Lightning.Protocol.BOLT1.Internal
+  (unsafeChannelId, unsafeChainHash, unsafeMsgUnknown)
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
@@ -454,11 +456,11 @@ message_tests = testGroup "Messages" [
     ]
   , testGroup "Unknown types" [
       testCase "decodeMessage unknown even type" $ do
-        case decodeMessage (MsgUnknown 100) "payload" of
+        case decodeMessage (unsafeMsgUnknown 100) "payload" of
           Left (DecodeUnknownEvenType 100) -> pure ()
           other -> assertFailure $ "expected unknown even: " ++ show other
     , testCase "decodeMessage unknown odd type" $ do
-        case decodeMessage (MsgUnknown 101) "payload" of
+        case decodeMessage (unsafeMsgUnknown 101) "payload" of
           Left (DecodeUnknownOddType 101) -> pure ()
           other -> assertFailure $ "expected unknown odd: " ++ show other
     ]
@@ -534,8 +536,8 @@ extension_tests = testGroup "Extension TLV" [
       -- Per BOLT #1: unknown even types must cause failure
       let pingPayload = mconcat [encodeU16 10, encodeU16 0]  -- numPong=10, len=0
           extTlv = mconcat [encodeBigSize 100, encodeBigSize 3, "abc"]  -- even!
-          envelope = encodeU16 18 <> pingPayload <> extTlv  -- type 18 = ping
-      case decodeEnvelope envelope of
+          env = encodeU16 18 <> pingPayload <> extTlv  -- type 18 = ping
+      case decodeEnvelope env of
         Left (DecodeInvalidExtension (TlvUnknownEvenType 100)) -> pure ()
         other -> assertFailure $ "expected unknown even error: " ++ show other
   , testCase "decode envelope with invalid extension fails" $ do
@@ -545,8 +547,8 @@ extension_tests = testGroup "Extension TLV" [
               encodeBigSize 101, encodeBigSize 1, "a"  -- odd types for this test
             , encodeBigSize 51, encodeBigSize 1, "b"   -- 51 < 101, invalid
             ]
-          envelope = encodeU16 18 <> pingPayload <> badTlv
-      case decodeEnvelope envelope of
+          env = encodeU16 18 <> pingPayload <> badTlv
+      case decodeEnvelope env of
         Left (DecodeInvalidExtension TlvNotStrictlyIncreasing) -> pure ()
         other -> assertFailure $ "expected invalid extension: " ++ show other
   , testCase "unknown even in extension fails even with odd types present" $ do
@@ -556,8 +558,8 @@ extension_tests = testGroup "Extension TLV" [
               encodeBigSize 101, encodeBigSize 1, "a"  -- odd, would be skipped
             , encodeBigSize 200, encodeBigSize 1, "b"  -- even, must fail
             ]
-          envelope = encodeU16 18 <> pingPayload <> extTlv
-      case decodeEnvelope envelope of
+          env = encodeU16 18 <> pingPayload <> extTlv
+      case decodeEnvelope env of
         Left (DecodeInvalidExtension (TlvUnknownEvenType 200)) -> pure ()
         other -> assertFailure $ "expected unknown even error: " ++ show other
   ]
@@ -669,15 +671,6 @@ property_tests = testGroup "Properties" [
 
 -- Helpers ---------------------------------------------------------------------
 
--- | Construct a 'ChannelId' from a known-valid 32-byte 'BS.ByteString'.
---
--- Uses 'error' for invalid input since all channel IDs in tests are
--- known-valid compile-time constants.
-unsafeChannelId :: BS.ByteString -> ChannelId
-unsafeChannelId bs = case channelId bs of
-  Just cid -> cid
-  Nothing  -> error $ "unsafeChannelId: invalid length: " ++ show (BS.length bs)
-
 -- | Decode hex string (test-only helper).
 --
 -- Uses 'error' for invalid hex since all hex literals in tests are
@@ -687,13 +680,3 @@ unhex :: BS.ByteString -> BS.ByteString
 unhex bs = case B16.decode bs of
   Just r  -> r
   Nothing -> error $ "unhex: invalid hex literal: " ++ show bs
-
--- | Construct a ChainHash from a bytestring (test-only helper).
---
--- Uses 'error' for invalid input since all chain hashes in tests are
--- known-valid 32-byte constants. This is acceptable in test code where
--- the failure would indicate a bug in the test itself.
-unsafeChainHash :: BS.ByteString -> ChainHash
-unsafeChainHash bs = case chainHash bs of
-  Just c  -> c
-  Nothing -> error $ "unsafeChainHash: not 32 bytes: " ++ show (BS.length bs)
