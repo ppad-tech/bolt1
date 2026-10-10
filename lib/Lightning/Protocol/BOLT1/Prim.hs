@@ -194,11 +194,15 @@ instance NFData Point
 
 -- | Construct a 'Point' from a 33-byte 'BS.ByteString'.
 --
--- Returns 'Nothing' if the input is not exactly 33 bytes.
+-- Returns 'Nothing' if the input is not exactly 33 bytes, or does not
+-- begin with a compressed-encoding prefix (0x02 or 0x03). The curve
+-- equation is not checked.
 point :: BS.ByteString -> Maybe Point
 point !bs
-  | BS.length bs == 33 = Just (Point bs)
-  | otherwise          = Nothing
+  | BS.length bs == 33
+  , let !h = BS.index bs 0
+  , h == 0x02 || h == 0x03 = Just (Point bs)
+  | otherwise              = Nothing
 {-# INLINE point #-}
 
 -- | Extract the raw bytes from a 'Point'.
