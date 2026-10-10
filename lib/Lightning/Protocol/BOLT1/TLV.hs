@@ -136,8 +136,8 @@ decodeTlvStreamRaw = go Nothing []
         Nothing -> pure ()
       (len, rest2) <- maybe (Left TlvNonMinimalEncoding) Right
                         (decodeBigSize rest1)
-      -- Length bounds check
-      when (fromIntegral len > BS.length rest2) $
+      -- Length bounds check (in Word64, so huge lengths can't wrap)
+      when (len > fromIntegral (BS.length rest2)) $
         Left TlvLengthExceedsBounds
       let !val = BS.take (fromIntegral len) rest2
           !rest3 = BS.drop (fromIntegral len) rest2
@@ -172,8 +172,8 @@ decodeTlvStreamWith isKnown = go Nothing []
         Nothing -> pure ()
       (len, rest2) <- maybe (Left TlvNonMinimalEncoding) Right
                         (decodeBigSize rest1)
-      -- Length bounds check
-      when (fromIntegral len > BS.length rest2) $
+      -- Length bounds check (in Word64, so huge lengths can't wrap)
+      when (len > fromIntegral (BS.length rest2)) $
         Left TlvLengthExceedsBounds
       let !val = BS.take (fromIntegral len) rest2
           !rest3 = BS.drop (fromIntegral len) rest2

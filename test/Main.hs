@@ -96,6 +96,18 @@ primitive_tests = testGroup "Primitives" [
       decodeU32 (BS.pack [0x01, 0x02]) @?= Nothing
   , testCase "decodeU64 insufficient" $
       decodeU64 (BS.pack [0x01, 0x02, 0x03, 0x04]) @?= Nothing
+  , testCase "point accepts 0x02 prefix" $
+      fmap unPoint (point (BS.cons 0x02 (BS.replicate 32 0x01)))
+        @?= Just (BS.cons 0x02 (BS.replicate 32 0x01))
+  , testCase "point accepts 0x03 prefix" $
+      fmap unPoint (point (BS.cons 0x03 (BS.replicate 32 0x01)))
+        @?= Just (BS.cons 0x03 (BS.replicate 32 0x01))
+  , testCase "point rejects 0x04 prefix (Appendix B)" $
+      point (unhex ("043da092f6980e58d2c037173180e9a465476026ee50f9"
+                 <> "6695963e8efe436f54eb"))
+        @?= Nothing
+  , testCase "point rejects wrong length" $
+      point (BS.cons 0x02 (BS.replicate 31 0x01)) @?= Nothing
   ]
 
 -- Signed integer tests ---------------------------------------------------------
@@ -281,6 +293,18 @@ tlv_tests = testGroup "TLV" [
     ]
   , testCase "empty stream" $
       decodeTlvStream "" @?= Right (unsafeTlvStream [])
+  , testCase "length 2^64-1 rejected (raw)" $
+      decodeTlvStreamRaw (unhex "01ffffffffffffffffff")
+        @?= Left TlvLengthExceedsBounds
+  , testCase "length 2^63 rejected (raw)" $
+      decodeTlvStreamRaw (unhex "01ff800000000000000067")
+        @?= Left TlvLengthExceedsBounds
+  , testCase "length 2^64-1 rejected (with predicate)" $
+      decodeTlvStreamWith (const True) (unhex "01ffffffffffffffffff")
+        @?= Left TlvLengthExceedsBounds
+  , testCase "huge length not reparsed as later records" $
+      decodeTlvStreamRaw (unhex "01ffffffffffffffffff6701aa")
+        @?= Left TlvLengthExceedsBounds
   , testCase "single record type 1" $ do
       let bs = mconcat [
               encodeBigSize 1      -- type
