@@ -4,748 +4,545 @@ module Main where
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as B16
-import Data.Word (Word64)
+import qualified Data.ByteString.Char8 as B8
+import Data.Int (Int64)
+import qualified Data.List as L
+import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.Word (Word16, Word32, Word64)
 import Lightning.Protocol.BOLT1
-import Lightning.Protocol.BOLT1.Internal
-  (unsafeChannelId, unsafeChainHash, unsafeMsgUnknown)
+import qualified Lightning.Protocol.BOLT9 as BOLT9
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
 
 main :: IO ()
 main = defaultMain $ testGroup "ppad-bolt1" [
-    bigsize_tests
-  , primitive_tests
-  , signed_tests
-  , truncated_tests
-  , minsigned_tests
-  , tlv_tests
-  , message_tests
-  , envelope_tests
-  , extension_tests
-  , bounds_tests
-  , property_tests
+    appendix_a
+  , appendix_b
+  , appendix_c
+  , appendix_d
+  , primitives
+  , tlv
+  , messages
+  , properties
   ]
 
--- BigSize test vectors from BOLT #1 Appendix A -------------------------------
+-- helpers --------------------------------------------------------------------
 
-bigsize_tests :: TestTree
-bigsize_tests = testGroup "BigSize (Appendix A)" [
-    testCase "zero" $
-      encodeBigSize 0 @?= unhex "00"
-  , testCase "one byte high (252)" $
-      encodeBigSize 252 @?= unhex "fc"
-  , testCase "two byte low (253)" $
-      encodeBigSize 253 @?= unhex "fd00fd"
-  , testCase "two byte high (65535)" $
-      encodeBigSize 65535 @?= unhex "fdffff"
-  , testCase "four byte low (65536)" $
-      encodeBigSize 65536 @?= unhex "fe00010000"
-  , testCase "four byte high (4294967295)" $
-      encodeBigSize 4294967295 @?= unhex "feffffffff"
-  , testCase "eight byte low (4294967296)" $
-      encodeBigSize 4294967296 @?= unhex "ff0000000100000000"
-  , testCase "eight byte high (max u64)" $
-      encodeBigSize 18446744073709551615 @?= unhex "ffffffffffffffffff"
-  , testCase "decode zero" $
-      decodeBigSize (unhex "00") @?= Just (0, "")
-  , testCase "decode 252" $
-      decodeBigSize (unhex "fc") @?= Just (252, "")
-  , testCase "decode 253" $
-      decodeBigSize (unhex "fd00fd") @?= Just (253, "")
-  , testCase "decode 65535" $
-      decodeBigSize (unhex "fdffff") @?= Just (65535, "")
-  , testCase "decode 65536" $
-      decodeBigSize (unhex "fe00010000") @?= Just (65536, "")
-  , testCase "decode 4294967295" $
-      decodeBigSize (unhex "feffffffff") @?= Just (4294967295, "")
-  , testCase "decode 4294967296" $
-      decodeBigSize (unhex "ff0000000100000000") @?= Just (4294967296, "")
-  , testCase "decode max u64" $
-      decodeBigSize (unhex "ffffffffffffffffff") @?=
-        Just (18446744073709551615, "")
-  , testCase "non-minimal 2-byte fails" $
-      decodeBigSize (unhex "fd00fc") @?= Nothing
-  , testCase "non-minimal 4-byte fails" $
-      decodeBigSize (unhex "fe0000ffff") @?= Nothing
-  , testCase "non-minimal 8-byte fails" $
-      decodeBigSize (unhex "ff00000000ffffffff") @?= Nothing
+-- run an assertion on decoded hex (spaces and a 0x prefix are allowed),
+-- failing the test if the literal isn't valid hex
+with_hex :: String -> (BS.ByteString -> Assertion) -> Assertion
+with_hex s k = case B16.decode (B8.pack (strip s)) of
+  Nothing -> assertFailure ("invalid hex literal: " ++ s)
+  Just bs -> k bs
+  where
+    strip = filter (/= ' ') . drop0x
+    drop0x ('0':'x':r) = r
+    drop0x r = r
+
+is_left :: Either a b -> Bool
+is_left = either (const True) (const False)
+
+empty_fv :: BOLT9.FeatureVector
+empty_fv = BOLT9.parse ""
+
+-- Appendix A: BigSize --------------------------------------------------------
+
+appendix_a :: TestTree
+appendix_a = testGroup "Appendix A (BigSize)" [
+    testGroup "decoding" (map dec ok_vectors)
+  , testGroup "encoding" (map enc ok_vectors)
+  , testGroup "decoding failures" (map bad bad_vectors)
+  ]
+  where
+    dec (v, h) = testCase ("decode " ++ h) $ with_hex h $ \bs ->
+      decode_bigsize bs @?= Just (v, "")
+    enc (v, h) = testCase ("encode " ++ show v) $ with_hex h $ \bs ->
+      encode_bigsize v @?= bs
+    bad h = testCase ("reject " ++ show h) $ with_hex h $ \bs ->
+      decode_bigsize bs @?= Nothing
+
+    ok_vectors :: [(Word64, String)]
+    ok_vectors = [
+        (0, "00"), (252, "fc"), (253, "fd00fd"), (65535, "fdffff")
+      , (65536, "fe00010000"), (4294967295, "feffffffff")
+      , (4294967296, "ff0000000100000000")
+      , (18446744073709551615, "ffffffffffffffffff")
+      ]
+
+    -- non-canonical encodings, short reads and no reads
+    bad_vectors = [
+        "fd00fc", "fe0000ffff", "ff00000000ffffffff"
+      , "fd00", "feffff", "ffffffffff"
+      , "", "fd", "fe", "ff"
+      ]
+
+-- Appendix B: TLV ------------------------------------------------------------
+
+-- the n1 and n2 test namespaces, decoded with bolt1's primitives
+
+data N1 = N1Tlv1 !Word64
+        | N1Tlv2 !ShortChannelId
+        | N1Tlv3 !Point !Word64 !Word64
+        | N1Tlv4 !Word16
+  deriving (Eq, Show)
+
+decode_n1 :: BS.ByteString -> Either String [N1]
+decode_n1 bs = do
+  s <- either (Left . show) Right (decode_tlv_stream (`elem` n1_types) bs)
+  sequence [ one r | r <- un_tlv_stream s, tlv_type r `elem` n1_types ]
+  where
+    n1_types = [1, 2, 3, 254]
+    one (TlvRecord 1 v) = maybe (Left "tlv1") (Right . N1Tlv1)
+      (decode_tu64 v)
+    one (TlvRecord 2 v) = case decode_short_channel_id v of
+      Just (c, "") -> Right (N1Tlv2 c)
+      _ -> Left "tlv2"
+    one (TlvRecord 3 v) = maybe (Left "tlv3") Right $ do
+      (p, r0) <- decode_point v
+      (a, r1) <- decode_u64 r0
+      (b, r2) <- decode_u64 r1
+      if BS.null r2 then pure (N1Tlv3 p a b) else Nothing
+    one (TlvRecord 254 v) = case decode_u16 v of
+      Just (c, "") -> Right (N1Tlv4 c)
+      _ -> Left "tlv4"
+    one _ = Left "unreachable"
+
+decode_n2 :: BS.ByteString -> Either String [(Word64, Word64)]
+decode_n2 bs = do
+  s <- either (Left . show) Right (decode_tlv_stream (`elem` [0, 11]) bs)
+  sequence [ one r | r <- un_tlv_stream s, tlv_type r `elem` [0, 11] ]
+  where
+    one (TlvRecord 0 v) = maybe (Left "tlv1") (Right . (,) 0) (decode_tu64 v)
+    one (TlvRecord 11 v) =
+      maybe (Left "tlv2") (Right . (,) 11 . fromIntegral) (decode_tu32 v)
+    one _ = Left "unreachable"
+
+appendix_b :: TestTree
+appendix_b = testGroup "Appendix B (TLV)" [
+    testGroup "failures in any namespace" [
+      testCase h $ with_hex h $ \bs -> do
+        assertBool "n1" (is_left (decode_n1 bs))
+        assertBool "n2" (is_left (decode_n2 bs))
+    | h <- any_fail ]
+  , testGroup "n1 failures" [
+      testCase h $ with_hex h $ \bs -> assertBool "n1" (is_left (decode_n1 bs))
+    | h <- n1_fail ]
+  , testGroup "n2 failures" [
+      testCase h $ with_hex h $ \bs -> assertBool "n2" (is_left (decode_n2 bs))
+    | h <- n2_fail ]
+  , testGroup "ignored successes" [
+      testCase h $ with_hex h $ \bs -> do
+        decode_n1 bs @?= Right []
+        decode_n2 bs @?= Right []
+    | h <- any_ok ]
+  , testGroup "n1 successes" [
+      testCase h $ with_hex h $ \bs -> decode_n1 bs @?= Right [v]
+    | (h, v) <- n1_ok ]
+  , testCase "n1 tlv3" $ with_hex n1_tlv3 $ \bs ->
+      with_hex node_id $ \pk -> case point pk of
+        Nothing -> assertFailure "bad node_id"
+        Just p  -> decode_n1 bs @?= Right [N1Tlv3 p 1 2]
+  , testCase "unknown even types fail when no types are known" $
+      mapM_ (\h -> with_hex h $ \bs ->
+        assertBool h (is_left (decode_tlv_stream (const False) bs)))
+        ["12 00", "fd0102 00", "fe01000002 00", "ff0100000000000002 00"]
+  , testCase "appending a higher-numbered valid stream succeeds" $
+      with_hex "01 01 01" $ \a -> with_hex "fd00fe 02 0226" $ \b ->
+        decode_n1 (a <> b) @?= Right [N1Tlv1 1, N1Tlv4 550]
+  , testCase "appending an invalid stream fails" $
+      with_hex "01 01 01" $ \a -> mapM_ (\h -> with_hex h $ \b ->
+        assertBool h (is_left (decode_n1 (a <> b)))) any_fail
+  ]
+  where
+    any_fail = [
+        "0xfd", "0xfd01", "0xfd0001 00", "0xfd0101", "0x0f fd", "0x0f fd26"
+      , "0x0f fd2602", "0x0f fd0001 00", "0x0f fd0201 " ++ replicate 1024 '0'
+      , "0x12 00", "0xfd0102 00", "0xfe01000002 00"
+      , "0xff0100000000000002 00"
+      ]
+    n1_fail = [
+        "0x01 09 ffffffffffffffffff", "0x01 01 00", "0x01 02 0001"
+      , "0x01 03 000100", "0x01 04 00010000", "0x01 05 0001000000"
+      , "0x01 06 000100000000", "0x01 07 00010000000000"
+      , "0x01 08 0001000000000000", "0x02 07 01010101010101"
+      , "0x02 09 010101010101010101"
+      , "0x03 21 " ++ node_id
+      , "0x03 29 " ++ node_id ++ "0000000000000001"
+      , "0x03 30 " ++ node_id ++ "000000000000000100000000000001"
+      , "0x03 31 04" ++ drop 2 node_id
+          ++ "00000000000000010000000000000002"
+      , "0x03 32 " ++ node_id ++ "0000000000000001000000000000000001"
+      , "0xfd00fe 00", "0xfd00fe 01 01", "0xfd00fe 03 010101", "0x00 00"
+      , "0x02 08 0000000000000226 01 01 2a"
+      , "0x02 08 0000000000000231 02 08 0000000000000451"
+      , "0x1f 00 0f 01 2a", "0x1f 00 1f 01 2a"
+      ]
+    n2_fail = ["0xffffffffffffffffff 00 00 00"]
+    any_ok = [
+        "0x", "0x21 00", "0xfd0201 00", "0xfd00fd 00", "0xfd00ff 00"
+      , "0xfe02000001 00", "0xff0200000000000001 00"
+      ]
+    n1_ok = [
+        ("0x01 00", N1Tlv1 0), ("0x01 01 01", N1Tlv1 1)
+      , ("0x01 02 0100", N1Tlv1 256), ("0x01 03 010000", N1Tlv1 65536)
+      , ("0x01 04 01000000", N1Tlv1 16777216)
+      , ("0x01 05 0100000000", N1Tlv1 4294967296)
+      , ("0x01 06 010000000000", N1Tlv1 1099511627776)
+      , ("0x01 07 01000000000000", N1Tlv1 281474976710656)
+      , ("0x01 08 0100000000000000", N1Tlv1 72057594037927936)
+      , ("0x02 08 0000000000000226", N1Tlv2 (ShortChannelId 0x226))
+      , ("0xfd00fe 02 0226", N1Tlv4 550)
+      ]
+    node_id =
+      "023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"
+    n1_tlv3 = "0x03 31 " ++ node_id ++ "00000000000000010000000000000002"
+
+-- Appendix C: message extension ----------------------------------------------
+
+appendix_c :: TestTree
+appendix_c = testGroup "Appendix C (message extension)" [
+    testCase "no extension" $ with_hex "001000000000" $ \bs ->
+      case decode_message bs of
+        Right (MsgInit i) -> do
+          init_networks i @?= Nothing
+          init_tlvs i @?= empty_tlv_stream
+        other -> assertFailure (show other)
+  , testCase "two unknown odd records are kept" $
+      with_hex "001000000000c9012acb0104" $ \bs ->
+        case decode_message bs of
+          Right m@(MsgInit i) -> do
+            map tlv_type (un_tlv_stream (init_tlvs i)) @?= [0xc9, 0xcb]
+            encode_message m @?= Right bs
+          other -> assertFailure (show other)
+  , testCase "truncated extension" $ with_hex "00100000000001" $ \bs ->
+      decode_message bs @?= Left (DecodeTlvError TlvTruncated)
+  , testCase "unknown even record" $ with_hex "001000000000ca012a" $ \bs ->
+      decode_message bs @?= Left (DecodeTlvError (TlvUnknownEvenType 0xca))
+  , testCase "duplicate record" $ with_hex "001000000000c90101c90102" $ \bs ->
+      decode_message bs @?= Left (DecodeTlvError TlvNotStrictlyIncreasing)
   ]
 
--- Primitive encode/decode tests -----------------------------------------------
+-- Appendix D: signed integers ------------------------------------------------
 
-primitive_tests :: TestTree
-primitive_tests = testGroup "Primitives" [
-    testCase "encodeU16 0x0102" $
-      encodeU16 0x0102 @?= BS.pack [0x01, 0x02]
-  , testCase "decodeU16 0x0102" $
-      decodeU16 (BS.pack [0x01, 0x02]) @?= Just (0x0102, "")
-  , testCase "encodeU32 0x01020304" $
-      encodeU32 0x01020304 @?= BS.pack [0x01, 0x02, 0x03, 0x04]
-  , testCase "decodeU32 0x01020304" $
-      decodeU32 (BS.pack [0x01, 0x02, 0x03, 0x04]) @?= Just (0x01020304, "")
-  , testCase "encodeU64" $
-      encodeU64 0x0102030405060708 @?=
-        BS.pack [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
-  , testCase "decodeU64" $
-      decodeU64 (BS.pack [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]) @?=
-        Just (0x0102030405060708, "")
-  , testCase "decodeU16 insufficient" $
-      decodeU16 (BS.pack [0x01]) @?= Nothing
-  , testCase "decodeU32 insufficient" $
-      decodeU32 (BS.pack [0x01, 0x02]) @?= Nothing
-  , testCase "decodeU64 insufficient" $
-      decodeU64 (BS.pack [0x01, 0x02, 0x03, 0x04]) @?= Nothing
-  , testCase "point accepts 0x02 prefix" $
-      fmap unPoint (point (BS.cons 0x02 (BS.replicate 32 0x01)))
-        @?= Just (BS.cons 0x02 (BS.replicate 32 0x01))
-  , testCase "point accepts 0x03 prefix" $
-      fmap unPoint (point (BS.cons 0x03 (BS.replicate 32 0x01)))
-        @?= Just (BS.cons 0x03 (BS.replicate 32 0x01))
-  , testCase "point rejects 0x04 prefix (Appendix B)" $
-      point (unhex ("043da092f6980e58d2c037173180e9a465476026ee50f9"
-                 <> "6695963e8efe436f54eb"))
+appendix_d :: TestTree
+appendix_d = testGroup "Appendix D (signed integers)" [
+    testCase (show v) $ with_hex h $ \bs -> case BS.length bs of
+      1 -> do
+        encode_s8 (fromIntegral v) @?= bs
+        decode_s8 bs @?= Just (fromIntegral v, "")
+      2 -> do
+        encode_s16 (fromIntegral v) @?= bs
+        decode_s16 bs @?= Just (fromIntegral v, "")
+      4 -> do
+        encode_s32 (fromIntegral v) @?= bs
+        decode_s32 bs @?= Just (fromIntegral v, "")
+      8 -> do
+        encode_s64 v @?= bs
+        decode_s64 bs @?= Just (v, "")
+      _ -> assertFailure "bad vector width"
+  | (v, h) <- vectors ]
+  where
+    vectors :: [(Int64, String)]
+    vectors = [
+        (0, "00"), (42, "2a"), (-42, "d6"), (127, "7f"), (-128, "80")
+      , (128, "0080"), (-129, "ff7f"), (15000, "3a98"), (-15000, "c568")
+      , (32767, "7fff"), (-32768, "8000"), (32768, "00008000")
+      , (-32769, "ffff7fff"), (21000000, "01406f40")
+      , (-21000000, "febf90c0"), (2147483647, "7fffffff")
+      , (-2147483648, "80000000"), (2147483648, "0000000080000000")
+      , (-2147483649, "ffffffff7fffffff"), (500000000000, "000000746a528800")
+      , (-500000000000, "ffffff8b95ad7800")
+      , (9223372036854775807, "7fffffffffffffff")
+      , (-9223372036854775808, "8000000000000000")
+      ]
+
+-- primitives -----------------------------------------------------------------
+
+primitives :: TestTree
+primitives = testGroup "Primitives" [
+    testCase "u16/u32/u64 known answers" $ do
+      encode_u16 0x0102 @?= "\x01\x02"
+      encode_u32 0x01020304 @?= "\x01\x02\x03\x04"
+      encode_u64 0x0102030405060708 @?= "\x01\x02\x03\x04\x05\x06\x07\x08"
+      decode_u32 "\x01\x02\x03\x04rest" @?= Just (0x01020304, "rest")
+  , testCase "short reads fail" $ do
+      decode_u16 "\x01" @?= Nothing
+      decode_u32 "\x01\x02\x03" @?= Nothing
+      decode_u64 "\x01\x02\x03\x04\x05\x06\x07" @?= Nothing
+      decode_s8 "" @?= Nothing
+  , testCase "truncated integers" $ do
+      encode_tu64 0 @?= ""
+      encode_tu64 1 @?= "\x01"
+      encode_tu32 0x010000 @?= "\x01\x00\x00"
+      decode_tu16 "" @?= Just 0
+      decode_tu16 "\x00\x01" @?= Nothing
+      decode_tu16 "\x01\x00\x00" @?= Nothing
+      decode_tu32 "\x01\x00\x00\x00\x00" @?= Nothing
+      decode_tu64 "\x01\x00\x00\x00\x00\x00\x00\x00\x00" @?= Nothing
+  , testCase "length-prefixed bytes" $ do
+      encode_u16_prefixed "abc" @?= Just "\x00\x03\&abc"
+      encode_u16_prefixed (BS.replicate 65536 0) @?= Nothing
+      decode_u16_prefixed "\x00\x03\&abcde" @?= Just ("abc", "de")
+      decode_u16_prefixed "\x00\x03\&ab" @?= Nothing
+  , testCase "fixed-size types check their lengths" $ do
+      assertBool "chain_hash" (isNothing (chain_hash (BS.replicate 31 0)))
+      assertBool "channel_id" (isNothing (channel_id (BS.replicate 33 0)))
+      assertBool "signature" (isNothing (signature (BS.replicate 65 0)))
+      assertBool "payment_hash" (isNothing (payment_hash ""))
+      assertBool "preimage" (isNothing (payment_preimage ""))
+      assertBool "secret" (isNothing (per_commitment_secret ""))
+  , testCase "point prefix" $ do
+      assertBool "02" (isJust (point (BS.cons 0x02 (BS.replicate 32 1))))
+      assertBool "03" (isJust (point (BS.cons 0x03 (BS.replicate 32 1))))
+      assertBool "04" (isNothing (point (BS.cons 0x04 (BS.replicate 32 1))))
+      assertBool "len" (isNothing (point (BS.cons 0x02 (BS.replicate 31 1))))
+  , testCase "short_channel_id" $ case short_channel_id 539268 845 1 of
+      Nothing -> assertFailure "valid scid rejected"
+      Just c -> do
+        scid_block_height c @?= 539268
+        scid_tx_index c @?= 845
+        scid_output_index c @?= 1
+        encode_short_channel_id c @?= "\x08\x3a\x84\x00\x03\x4d\x00\x01"
+  , testCase "short_channel_id rejects 25-bit components" $ do
+      short_channel_id 0x1000000 0 0 @?= Nothing
+      short_channel_id 0 0x1000000 0 @?= Nothing
+  , testCase "amount bounds" $ do
+      fmap un_satoshi (satoshi 0x000775f05a074000) @?= Just 0x000775f05a074000
+      satoshi 0x000775f05a074001 @?= Nothing
+      fmap un_milli_satoshi (milli_satoshi 0x1d24b2dfac520000)
+        @?= Just 0x1d24b2dfac520000
+      milli_satoshi 0x1d24b2dfac520001 @?= Nothing
+      sat_to_msat max_satoshi @?= max_milli_satoshi
+      decode_satoshi (encode_u64 0x000775f05a074001) @?= Nothing
+      decode_milli_satoshi (encode_u64 maxBound) @?= Nothing
+  , testCase "checked arithmetic" $ do
+      add_sat max_satoshi max_satoshi @?= Nothing
+      (do a <- satoshi 1; b <- satoshi 2; sub_sat a b) @?= Nothing
+      (do a <- satoshi 2; b <- satoshi 1; sub_sat a b) @?= satoshi 1
+      (do a <- milli_satoshi 1; b <- milli_satoshi 2; sub_msat a b)
         @?= Nothing
-  , testCase "point rejects wrong length" $
-      point (BS.cons 0x02 (BS.replicate 31 0x01)) @?= Nothing
+      add_msat max_milli_satoshi max_milli_satoshi @?= Nothing
+  , testCase "secrets don't show" $
+      case payment_preimage (BS.replicate 32 7) of
+        Nothing -> assertFailure "valid preimage rejected"
+        Just p -> do
+          show p @?= "PaymentPreimage <redacted>"
+          show (Just p) @?= "Just (PaymentPreimage <redacted>)"
+  , testCase "secret equality" $ do
+      let a = payment_preimage (BS.replicate 32 7)
+          b = payment_preimage (BS.replicate 31 7 <> "\x08")
+      assertBool "equal" (a == a)
+      assertBool "unequal" (a /= b)
   ]
 
--- Signed integer tests ---------------------------------------------------------
+-- TLV ------------------------------------------------------------------------
 
-signed_tests :: TestTree
-signed_tests = testGroup "Signed integers" [
-    testCase "encodeS8 42" $
-      encodeS8 42 @?= BS.pack [0x2a]
-  , testCase "encodeS8 -42" $
-      encodeS8 (-42) @?= BS.pack [0xd6]
-  , testCase "encodeS8 127" $
-      encodeS8 127 @?= BS.pack [0x7f]
-  , testCase "encodeS8 -128" $
-      encodeS8 (-128) @?= BS.pack [0x80]
-  , testCase "decodeS8 42" $
-      decodeS8 (BS.pack [0x2a]) @?= Just (42, "")
-  , testCase "decodeS8 -42" $
-      decodeS8 (BS.pack [0xd6]) @?= Just (-42, "")
-  , testCase "encodeS16 -1" $
-      encodeS16 (-1) @?= BS.pack [0xff, 0xff]
-  , testCase "encodeS16 32767" $
-      encodeS16 32767 @?= BS.pack [0x7f, 0xff]
-  , testCase "encodeS16 -32768" $
-      encodeS16 (-32768) @?= BS.pack [0x80, 0x00]
-  , testCase "decodeS16 -1" $
-      decodeS16 (BS.pack [0xff, 0xff]) @?= Just (-1, "")
-  , testCase "encodeS32 -1" $
-      encodeS32 (-1) @?= BS.pack [0xff, 0xff, 0xff, 0xff]
-  , testCase "encodeS32 2147483647" $
-      encodeS32 2147483647 @?= BS.pack [0x7f, 0xff, 0xff, 0xff]
-  , testCase "encodeS32 -2147483648" $
-      encodeS32 (-2147483648) @?= BS.pack [0x80, 0x00, 0x00, 0x00]
-  , testCase "decodeS32 -1" $
-      decodeS32 (BS.pack [0xff, 0xff, 0xff, 0xff]) @?= Just (-1, "")
-  , testCase "encodeS64 -1" $
-      encodeS64 (-1) @?=
-        BS.pack [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
-  , testCase "decodeS64 -1" $
-      decodeS64 (BS.pack [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]) @?=
-        Just (-1, "")
+tlv :: TestTree
+tlv = testGroup "TLV" [
+    testCase "tlv_stream sorts" $
+      fmap (map tlv_type . un_tlv_stream)
+        (tlv_stream [TlvRecord 5 "", TlvRecord 1 "", TlvRecord 3 ""])
+        @?= Just [1, 3, 5]
+  , testCase "tlv_stream rejects duplicates" $
+      tlv_stream [TlvRecord 1 "a", TlvRecord 1 "b"] @?= Nothing
+  , testCase "lookup_tlv" $ do
+      (lookup_tlv 3 =<< tlv_stream [TlvRecord 1 "a", TlvRecord 3 "b"])
+        @?= Just "b"
+      (lookup_tlv 2 =<< tlv_stream [TlvRecord 1 "a", TlvRecord 3 "b"])
+        @?= Nothing
+  , testCase "huge lengths are rejected, not wrapped" $
+      mapM_ (\h -> with_hex h $ \bs ->
+               decode_tlv_stream (const True) bs @?= Left TlvTruncated)
+        [ "01ffffffffffffffffff", "01ff800000000000000067"
+        , "01ffffffffffffffffff6701aa" ]
+  , testCase "truncation vs non-minimal" $ do
+      decode_tlv_stream (const True) "\xfd" @?= Left TlvTruncated
+      decode_tlv_stream (const True) "\xfd\x00\x01\x00"
+        @?= Left TlvNonMinimalBigSize
+  , testCase "unknown odd records are kept" $
+      fmap (map tlv_type . un_tlv_stream)
+        (decode_tlv_stream (const False) "\x01\x00\x03\x01\x2a")
+        @?= Right [1, 3]
   ]
 
--- Truncated unsigned integer tests ---------------------------------------------
+-- messages -------------------------------------------------------------------
 
-truncated_tests :: TestTree
-truncated_tests = testGroup "Truncated unsigned integers" [
-    testCase "encodeTu16 0" $
-      encodeTu16 0 @?= ""
-  , testCase "encodeTu16 1" $
-      encodeTu16 1 @?= BS.pack [0x01]
-  , testCase "encodeTu16 255" $
-      encodeTu16 255 @?= BS.pack [0xff]
-  , testCase "encodeTu16 256" $
-      encodeTu16 256 @?= BS.pack [0x01, 0x00]
-  , testCase "encodeTu16 65535" $
-      encodeTu16 65535 @?= BS.pack [0xff, 0xff]
-  , testCase "decodeTu16 0 bytes" $
-      decodeTu16 0 "" @?= Just (0, "")
-  , testCase "decodeTu16 1 byte" $
-      decodeTu16 1 (BS.pack [0x01]) @?= Just (1, "")
-  , testCase "decodeTu16 2 bytes" $
-      decodeTu16 2 (BS.pack [0x01, 0x00]) @?= Just (256, "")
-  , testCase "decodeTu16 non-minimal fails" $
-      decodeTu16 2 (BS.pack [0x00, 0x01]) @?= Nothing
-  , testCase "encodeTu32 0" $
-      encodeTu32 0 @?= ""
-  , testCase "encodeTu32 1" $
-      encodeTu32 1 @?= BS.pack [0x01]
-  , testCase "encodeTu32 0x010000" $
-      encodeTu32 0x010000 @?= BS.pack [0x01, 0x00, 0x00]
-  , testCase "encodeTu32 0x01000000" $
-      encodeTu32 0x01000000 @?= BS.pack [0x01, 0x00, 0x00, 0x00]
-  , testCase "decodeTu32 0 bytes" $
-      decodeTu32 0 "" @?= Just (0, "")
-  , testCase "decodeTu32 3 bytes" $
-      decodeTu32 3 (BS.pack [0x01, 0x00, 0x00]) @?= Just (0x010000, "")
-  , testCase "decodeTu32 non-minimal fails" $
-      decodeTu32 3 (BS.pack [0x00, 0x01, 0x00]) @?= Nothing
-  , testCase "encodeTu64 0" $
-      encodeTu64 0 @?= ""
-  , testCase "encodeTu64 0x0100000000" $
-      encodeTu64 0x0100000000 @?= BS.pack [0x01, 0x00, 0x00, 0x00, 0x00]
-  , testCase "decodeTu64 5 bytes" $
-      decodeTu64 5 (BS.pack [0x01, 0x00, 0x00, 0x00, 0x00]) @?=
-        Just (0x0100000000, "")
-  , testCase "decodeTu64 non-minimal fails" $
-      decodeTu64 5 (BS.pack [0x00, 0x01, 0x00, 0x00, 0x00]) @?= Nothing
+messages :: TestTree
+messages = testGroup "Messages" [
+    testCase "pong known answer" $
+      encode_message (MsgPong (Pong "\x00\x00" empty_tlv_stream))
+        @?= Right "\x00\x13\x00\x02\x00\x00"
+  , testCase "ping known answer" $
+      encode_message (MsgPing (Ping 4 "" empty_tlv_stream))
+        @?= Right "\x00\x12\x00\x04\x00\x00"
+  , testCase "error known answer" $
+      encode_message (MsgError (Error all_channels "x" empty_tlv_stream))
+        @?= Right ("\x00\x11" <> BS.replicate 32 0 <> "\x00\x01x")
+  , testCase "init with networks and remote_addr" $
+      case chain_hash (BS.replicate 32 0x6f) of
+        Nothing -> assertFailure "valid chain hash rejected"
+        Just ch -> do
+          let addr = "\x01\x7f\x00\x00\x01\x26\x07"
+              i = Init empty_fv (BOLT9.parse "\x02") (Just [ch])
+                    (Just addr) empty_tlv_stream
+              wire = "\x00\x10\x00\x00\x00\x01\x02"
+                  <> "\x01\x20" <> un_chain_hash ch <> "\x03\x07" <> addr
+          encode_message (MsgInit i) @?= Right wire
+          decode_message wire @?= Right (MsgInit i)
+  , testCase "init networks must be a multiple of 32 bytes" $
+      decode_init "\x00\x00\x00\x00\x01\x01\x00"
+        @?= Left (DecodeInvalidTlvValue 1)
+  , testCase "init rejects tlvs clashing with typed fields" $
+      case tlv_stream [TlvRecord 3 "x"] of
+        Nothing -> assertFailure "valid stream rejected"
+        Just s  -> encode_init (Init empty_fv empty_fv Nothing (Just "y") s)
+          @?= Left EncodeInvalidTlvs
+  , testCase "unknown message types" $ do
+      decode_message "\x00\x20" @?= Left (DecodeUnknownEvenType 32)
+      decode_message "\x80\x01" @?= Left (DecodeUnknownOddType 32769)
+      decode_message "\x00" @?= Left DecodeInsufficientBytes
+  , testCase "truncated payloads" $ do
+      decode_init "\x00" @?= Left DecodeInsufficientBytes
+      decode_init "\x00\x01" @?= Left DecodeInsufficientBytes
+      decode_error (BS.replicate 31 0) @?= Left DecodeInsufficientBytes
+      decode_warning (BS.replicate 33 0) @?= Left DecodeInsufficientBytes
+      decode_ping "\x00\x04\x00\x02\x00" @?= Left DecodeInsufficientBytes
+      decode_pong "\x00\x02\x00" @?= Left DecodeInsufficientBytes
+      decode_peer_storage "\x00\x01" @?= Left DecodeInsufficientBytes
+      decode_peer_storage_retrieval "\x00" @?= Left DecodeInsufficientBytes
+  , testCase "invalid extensions" $ do
+      decode_pong "\x00\x00\x02\x00" @?= Left
+        (DecodeTlvError (TlvUnknownEvenType 2))
+      decode_ping "\x00\x00\x00\x00\x01" @?= Left (DecodeTlvError TlvTruncated)
+  , testCase "message size limit" $ do
+      encode_envelope 7 (BS.replicate 65533 0) @?=
+        Right (encode_u16 7 <> BS.replicate 65533 0)
+      encode_envelope 7 (BS.replicate 65534 0) @?= Left EncodeMessageTooLarge
+      encode_message (MsgPeerStorage (PeerStorage (BS.replicate 65532 0)
+        empty_tlv_stream)) @?= Left EncodeMessageTooLarge
+      encode_pong (Pong (BS.replicate 65536 0) empty_tlv_stream)
+        @?= Left EncodeLengthOverflow
+  , testCase "ping_response" $ do
+      ping_response (Ping 3 "ab" empty_tlv_stream)
+        @?= Just (Pong "\x00\x00\x00" empty_tlv_stream)
+      ping_response (Ping 65531 "" empty_tlv_stream) @?=
+        Just (Pong (BS.replicate 65531 0) empty_tlv_stream)
+      ping_response (Ping 65532 "" empty_tlv_stream) @?= Nothing
   ]
 
--- Minimal signed integer tests (Appendix D) ------------------------------------
+-- properties -----------------------------------------------------------------
 
-minsigned_tests :: TestTree
-minsigned_tests = testGroup "Minimal signed (Appendix D)" [
-    -- Test vectors from BOLT #1 Appendix D
-    testCase "encode 0" $
-      encodeMinSigned 0 @?= unhex "00"
-  , testCase "encode 42" $
-      encodeMinSigned 42 @?= unhex "2a"
-  , testCase "encode -42" $
-      encodeMinSigned (-42) @?= unhex "d6"
-  , testCase "encode 127" $
-      encodeMinSigned 127 @?= unhex "7f"
-  , testCase "encode -128" $
-      encodeMinSigned (-128) @?= unhex "80"
-  , testCase "encode 128" $
-      encodeMinSigned 128 @?= unhex "0080"
-  , testCase "encode -129" $
-      encodeMinSigned (-129) @?= unhex "ff7f"
-  , testCase "encode 15000" $
-      encodeMinSigned 15000 @?= unhex "3a98"
-  , testCase "encode -15000" $
-      encodeMinSigned (-15000) @?= unhex "c568"
-  , testCase "encode 32767" $
-      encodeMinSigned 32767 @?= unhex "7fff"
-  , testCase "encode -32768" $
-      encodeMinSigned (-32768) @?= unhex "8000"
-  , testCase "encode 32768" $
-      encodeMinSigned 32768 @?= unhex "00008000"
-  , testCase "encode -32769" $
-      encodeMinSigned (-32769) @?= unhex "ffff7fff"
-  , testCase "encode 21000000" $
-      encodeMinSigned 21000000 @?= unhex "01406f40"
-  , testCase "encode -21000000" $
-      encodeMinSigned (-21000000) @?= unhex "febf90c0"
-  , testCase "encode 2147483647" $
-      encodeMinSigned 2147483647 @?= unhex "7fffffff"
-  , testCase "encode -2147483648" $
-      encodeMinSigned (-2147483648) @?= unhex "80000000"
-  , testCase "encode 2147483648" $
-      encodeMinSigned 2147483648 @?= unhex "0000000080000000"
-  , testCase "encode -2147483649" $
-      encodeMinSigned (-2147483649) @?= unhex "ffffffff7fffffff"
-  , testCase "encode 500000000000" $
-      encodeMinSigned 500000000000 @?= unhex "000000746a528800"
-  , testCase "encode -500000000000" $
-      encodeMinSigned (-500000000000) @?= unhex "ffffff8b95ad7800"
-  , testCase "encode max int64" $
-      encodeMinSigned 9223372036854775807 @?= unhex "7fffffffffffffff"
-  , testCase "encode min int64" $
-      encodeMinSigned (-9223372036854775808) @?= unhex "8000000000000000"
-  -- Decode tests
-  , testCase "decode 1-byte 42" $
-      decodeMinSigned 1 (unhex "2a") @?= Just (42, "")
-  , testCase "decode 1-byte -42" $
-      decodeMinSigned 1 (unhex "d6") @?= Just (-42, "")
-  , testCase "decode 2-byte 128" $
-      decodeMinSigned 2 (unhex "0080") @?= Just (128, "")
-  , testCase "decode 2-byte -129" $
-      decodeMinSigned 2 (unhex "ff7f") @?= Just (-129, "")
-  , testCase "decode 4-byte 32768" $
-      decodeMinSigned 4 (unhex "00008000") @?= Just (32768, "")
-  , testCase "decode 8-byte 2147483648" $
-      decodeMinSigned 8 (unhex "0000000080000000") @?= Just (2147483648, "")
-  -- Minimality rejection
-  , testCase "decode 2-byte for 1-byte value fails" $
-      decodeMinSigned 2 (unhex "0042") @?= Nothing  -- 42 fits in 1 byte
-  , testCase "decode 4-byte for 2-byte value fails" $
-      decodeMinSigned 4 (unhex "00000080") @?= Nothing  -- 128 fits in 2 bytes
-  , testCase "decode 8-byte for 4-byte value fails" $
-      decodeMinSigned 8 (unhex "0000000000008000") @?= Nothing  -- 32768 fits in 4
-  ]
+newtype Bytes = Bytes BS.ByteString
+  deriving Show
 
--- TLV tests -------------------------------------------------------------------
+instance Arbitrary Bytes where
+  arbitrary = Bytes . BS.pack <$> (choose (0, 64) >>= vector)
 
-tlv_tests :: TestTree
-tlv_tests = testGroup "TLV" [
-    testGroup "tlvStream smart constructor" [
-      testCase "empty list succeeds" $
-        tlvStream [] @?= Just (unsafeTlvStream [])
-    , testCase "single record succeeds" $
-        tlvStream [TlvRecord 1 "a"] @?= Just (unsafeTlvStream [TlvRecord 1 "a"])
-    , testCase "strictly increasing succeeds" $
-        tlvStream [TlvRecord 1 "a", TlvRecord 3 "b", TlvRecord 5 "c"] @?=
-          Just (unsafeTlvStream [TlvRecord 1 "a", TlvRecord 3 "b",
-                                 TlvRecord 5 "c"])
-    , testCase "non-increasing fails" $
-        tlvStream [TlvRecord 5 "a", TlvRecord 3 "b"] @?= Nothing
-    , testCase "duplicate types fails" $
-        tlvStream [TlvRecord 1 "a", TlvRecord 1 "b"] @?= Nothing
-    , testCase "equal adjacent types fails" $
-        tlvStream [TlvRecord 1 "a", TlvRecord 2 "b", TlvRecord 2 "c"] @?=
-          Nothing
+-- streams of unknown odd records
+newtype OddTlvs = OddTlvs TlvStream
+  deriving Show
+
+instance Arbitrary OddTlvs where
+  arbitrary = do
+    ts <- L.nub . map (\t -> 2 * (t `div` 2) + 1)
+            <$> listOf (arbitrary :: Gen Word64)
+    vs <- vectorOf (length ts) arbitrary
+    pure . OddTlvs . fromMaybe empty_tlv_stream $
+      tlv_stream [ TlvRecord t v | (t, Bytes v) <- zip ts vs ]
+
+newtype Bytes32 = Bytes32 BS.ByteString
+  deriving Show
+
+instance Arbitrary Bytes32 where
+  arbitrary = Bytes32 . BS.pack <$> vector 32
+
+newtype Msg = Msg Message
+  deriving Show
+
+instance Arbitrary Msg where
+  arbitrary = Msg <$> oneof [
+      do Bytes a <- arbitrary
+         Bytes b <- arbitrary
+         nets <- oneof [pure Nothing, Just <$> listOf chain]
+         addr <- oneof [pure Nothing, (\(Bytes x) -> Just x) <$> arbitrary]
+         OddTlvs s <- arbitrary
+         let s' = filter_tlv_stream (\t -> t /= 1 && t /= 3) s
+         pure (MsgInit (Init (BOLT9.parse a) (BOLT9.parse b) nets addr s'))
+    , do c <- cid
+         Bytes d <- arbitrary
+         OddTlvs s <- arbitrary
+         pure (MsgError (Error c d s))
+    , do c <- cid
+         Bytes d <- arbitrary
+         OddTlvs s <- arbitrary
+         pure (MsgWarning (Warning c d s))
+    , do n <- arbitrary
+         Bytes d <- arbitrary
+         OddTlvs s <- arbitrary
+         pure (MsgPing (Ping n d s))
+    , do Bytes d <- arbitrary
+         OddTlvs s <- arbitrary
+         pure (MsgPong (Pong d s))
+    , do Bytes d <- arbitrary
+         OddTlvs s <- arbitrary
+         pure (MsgPeerStorage (PeerStorage d s))
+    , do Bytes d <- arbitrary
+         OddTlvs s <- arbitrary
+         pure (MsgPeerStorageRetrieval (PeerStorageRetrieval d s))
     ]
-  , testCase "empty stream" $
-      decodeTlvStream "" @?= Right (unsafeTlvStream [])
-  , testCase "length 2^64-1 rejected (raw)" $
-      decodeTlvStreamRaw (unhex "01ffffffffffffffffff")
-        @?= Left TlvLengthExceedsBounds
-  , testCase "length 2^63 rejected (raw)" $
-      decodeTlvStreamRaw (unhex "01ff800000000000000067")
-        @?= Left TlvLengthExceedsBounds
-  , testCase "length 2^64-1 rejected (with predicate)" $
-      decodeTlvStreamWith (const True) (unhex "01ffffffffffffffffff")
-        @?= Left TlvLengthExceedsBounds
-  , testCase "huge length not reparsed as later records" $
-      decodeTlvStreamRaw (unhex "01ffffffffffffffffff6701aa")
-        @?= Left TlvLengthExceedsBounds
-  , testCase "single record type 1" $ do
-      let bs = mconcat [
-              encodeBigSize 1      -- type
-            , encodeBigSize 32     -- length
-            , BS.replicate 32 0x00 -- value (chain hash)
-            ]
-      case decodeTlvStream bs of
-        Right stream -> case unTlvStream stream of
-          [r] -> do
-            tlvType r @?= 1
-            BS.length (tlvValue r) @?= 32
-          _ -> assertFailure "expected single record"
-        Left e -> assertFailure $ "unexpected error: " ++ show e
-  , testCase "strictly increasing types" $ do
-      let bs = mconcat [
-              encodeBigSize 1, encodeBigSize 0
-            , encodeBigSize 3, encodeBigSize 4, "test"
-            ]
-      case decodeTlvStream bs of
-        Right stream -> length (unTlvStream stream) @?= 2
-        Left e -> assertFailure $ "unexpected error: " ++ show e
-  , testCase "non-increasing types fails" $ do
-      let bs = mconcat [
-              encodeBigSize 3, encodeBigSize 0
-            , encodeBigSize 1, encodeBigSize 0
-            ]
-      case decodeTlvStream bs of
-        Left TlvNotStrictlyIncreasing -> pure ()
-        other -> assertFailure $ "expected TlvNotStrictlyIncreasing: " ++
-                                 show other
-  , testCase "duplicate types fails" $ do
-      let bs = mconcat [
-              encodeBigSize 1, encodeBigSize 0
-            , encodeBigSize 1, encodeBigSize 0
-            ]
-      case decodeTlvStream bs of
-        Left TlvNotStrictlyIncreasing -> pure ()
-        other -> assertFailure $ "expected TlvNotStrictlyIncreasing: " ++
-                                 show other
-  , testCase "unknown even type fails" $ do
-      let bs = mconcat [encodeBigSize 2, encodeBigSize 0]
-      case decodeTlvStream bs of
-        Left (TlvUnknownEvenType 2) -> pure ()
-        other -> assertFailure $ "expected TlvUnknownEvenType: " ++ show other
-  , testCase "unknown odd type skipped" $ do
-      let bs = mconcat [
-              encodeBigSize 5, encodeBigSize 2, "hi"
-            , encodeBigSize 7, encodeBigSize 0
-            ]
-      case decodeTlvStream bs of
-        Right stream | null (unTlvStream stream) -> pure ()  -- both skipped
-        other -> assertFailure $ "expected empty stream: " ++ show other
-  , testCase "length exceeds bounds fails" $ do
-      let bs = mconcat [encodeBigSize 1, encodeBigSize 100, "short"]
-      case decodeTlvStream bs of
-        Left TlvLengthExceedsBounds -> pure ()
-        other -> assertFailure $ "expected TlvLengthExceedsBounds: " ++
-                                 show other
-  , testCase "decodeTlvStreamWith custom predicate" $ do
-      -- Use a predicate that only knows type 5
-      let isKnown t = t == 5
-          bs = mconcat [
-              encodeBigSize 5, encodeBigSize 2, "hi"
-            ]
-      case decodeTlvStreamWith isKnown bs of
-        Right stream -> case unTlvStream stream of
-          [r] -> tlvType r @?= 5
-          _ -> assertFailure "expected single record"
-        Left e -> assertFailure $ "unexpected error: " ++ show e
-  , testCase "decodeTlvStreamRaw returns all records" $ do
-      let bs = mconcat [
-              encodeBigSize 2, encodeBigSize 1, "a"  -- even type
-            , encodeBigSize 5, encodeBigSize 1, "b"  -- odd type
-            ]
-      case decodeTlvStreamRaw bs of
-        Right stream -> length (unTlvStream stream) @?= 2
-        Left e -> assertFailure $ "unexpected error: " ++ show e
+    where
+      chain = do
+        Bytes32 b <- arbitrary
+        maybe chain pure (chain_hash b)
+      cid = do
+        Bytes32 b <- arbitrary
+        pure (fromMaybe all_channels (channel_id b))
+
+properties :: TestTree
+properties = testGroup "Properties" [
+    testProperty "bigsize round-trips" $ \w ->
+      decode_bigsize (encode_bigsize w) === Just (w, "")
+  , testProperty "tu16 round-trips" $ \w ->
+      decode_tu16 (encode_tu16 w) === Just w
+  , testProperty "tu32 round-trips" $ \w ->
+      decode_tu32 (encode_tu32 w) === Just w
+  , testProperty "tu64 round-trips" $ \w ->
+      decode_tu64 (encode_tu64 w) === Just w
+  , testProperty "u16 round-trips" $ \w ->
+      decode_u16 (encode_u16 w) === Just (w, "")
+  , testProperty "u32 round-trips" $ \w ->
+      decode_u32 (encode_u32 w) === Just (w, "")
+  , testProperty "u64 round-trips" $ \w ->
+      decode_u64 (encode_u64 w) === Just (w, "")
+  , testProperty "s64 round-trips" $ \w ->
+      decode_s64 (encode_s64 w) === Just (w, "")
+  , testProperty "scid components round-trip" $ \h t o ->
+      let h' = h `mod` 0x1000000 :: Word32
+          t' = t `mod` 0x1000000 :: Word32
+      in  fmap (\c -> (scid_block_height c, scid_tx_index c,
+                       scid_output_index c)) (short_channel_id h' t' o)
+            === Just (h', t', o)
+  , testProperty "sat -> msat -> sat is the identity" $
+      forAll (choose (0, 0x000775f05a074000)) $ \w ->
+        fmap (msat_to_sat . sat_to_msat) (satoshi w) === satoshi w
+  , testProperty "add then sub is the identity" $
+      forAll (choose (0, 0x000775f05a074000)) $ \a ->
+      forAll (choose (0, 0x000775f05a074000 - a)) $ \b ->
+        (do x <- satoshi a
+            y <- satoshi b
+            z <- add_sat x y
+            sub_sat z y) === satoshi a
+  , testProperty "tlv streams round-trip" $ \(OddTlvs s) ->
+      decode_tlv_stream (const False) (encode_tlv_stream s) === Right s
+  , testProperty "messages round-trip" $ \(Msg m) ->
+      case encode_message m of
+        Left e   -> counterexample (show e) False
+        Right bs -> decode_message bs === Right m
+  , testProperty "re-encoding reproduces the wire bytes" $ \(Msg m) ->
+      case encode_message m of
+        Left e   -> counterexample (show e) False
+        Right bs -> case decode_message bs of
+          Left e   -> counterexample (show e) False
+          Right m' -> encode_message m' === Right bs
   ]
-
--- Message encode/decode tests -------------------------------------------------
-
-message_tests :: TestTree
-message_tests = testGroup "Messages" [
-    testGroup "Init" [
-      testCase "encode/decode minimal init" $ do
-        let msg = Init "" "" []
-        case encodeMessage (MsgInitVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgInit encoded of
-            Right (MsgInitVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    , testCase "encode/decode init with features" $ do
-        let msg = Init (BS.pack [0x01]) (BS.pack [0x02, 0x0a]) []
-        case encodeMessage (MsgInitVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgInit encoded of
-            Right (MsgInitVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    , testCase "encode/decode init with networks TLV" $ do
-        let ch = unsafeChainHash (BS.replicate 32 0xab)
-            msg = Init "" "" [InitNetworks [ch]]
-        case encodeMessage (MsgInitVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgInit encoded of
-            Right (MsgInitVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    ]
-  , testGroup "Error" [
-      testCase "encode/decode error" $ do
-        let cid = unsafeChannelId (BS.replicate 32 0xff)
-            msg = Error cid "something went wrong"
-        case encodeMessage (MsgErrorVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgError encoded of
-            Right (MsgErrorVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    , testCase "error insufficient channel_id" $ do
-        case decodeMessage MsgError (BS.replicate 31 0x00) of
-          Left DecodeInsufficientBytes -> pure ()
-          other -> assertFailure $ "expected insufficient: " ++ show other
-    ]
-  , testGroup "Warning" [
-      testCase "encode/decode warning" $ do
-        let cid = unsafeChannelId (BS.replicate 32 0x00)
-            msg = Warning cid "be careful"
-        case encodeMessage (MsgWarningVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgWarning encoded of
-            Right (MsgWarningVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    ]
-  , testGroup "Ping" [
-      testCase "encode/decode ping" $ do
-        let msg = Ping 100 (BS.replicate 10 0x00)
-        case encodeMessage (MsgPingVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgPing encoded of
-            Right (MsgPingVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    , testCase "ping with zero ignored" $ do
-        let msg = Ping 50 ""
-        case encodeMessage (MsgPingVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgPing encoded of
-            Right (MsgPingVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    ]
-  , testGroup "Pong" [
-      testCase "encode/decode pong" $ do
-        let msg = Pong (BS.replicate 100 0x00)
-        case encodeMessage (MsgPongVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgPong encoded of
-            Right (MsgPongVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    ]
-  , testGroup "PeerStorage" [
-      testCase "encode/decode peer_storage" $ do
-        let msg = PeerStorage "encrypted blob data"
-        case encodeMessage (MsgPeerStorageVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgPeerStorage encoded of
-            Right (MsgPeerStorageVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    ]
-  , testGroup "PeerStorageRetrieval" [
-      testCase "encode/decode peer_storage_retrieval" $ do
-        let msg = PeerStorageRetrieval "retrieved blob"
-        case encodeMessage (MsgPeerStorageRetrievalVal msg) of
-          Left e -> assertFailure $ "encode failed: " ++ show e
-          Right encoded -> case decodeMessage MsgPeerStorageRet encoded of
-            Right (MsgPeerStorageRetrievalVal decoded, _) -> decoded @?= msg
-            other -> assertFailure $ "unexpected: " ++ show other
-    ]
-  , testGroup "Unknown types" [
-      testCase "decodeMessage unknown even type" $ do
-        case decodeMessage (unsafeMsgUnknown 100) "payload" of
-          Left (DecodeUnknownEvenType 100) -> pure ()
-          other -> assertFailure $ "expected unknown even: " ++ show other
-    , testCase "decodeMessage unknown odd type" $ do
-        case decodeMessage (unsafeMsgUnknown 101) "payload" of
-          Left (DecodeUnknownOddType 101) -> pure ()
-          other -> assertFailure $ "expected unknown odd: " ++ show other
-    ]
-  ]
-
--- Envelope tests --------------------------------------------------------------
-
-envelope_tests :: TestTree
-envelope_tests = testGroup "Envelope" [
-    testCase "encode/decode init envelope" $ do
-      let msg = MsgInitVal (Init "" "" [])
-      case encodeEnvelope msg Nothing of
-        Left e -> assertFailure $ "encode failed: " ++ show e
-        Right encoded -> case decodeEnvelope encoded of
-          Right (Just decoded, _) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
-  , testCase "encode/decode ping envelope" $ do
-      let msg = MsgPingVal (Ping 10 "")
-      case encodeEnvelope msg Nothing of
-        Left e -> assertFailure $ "encode failed: " ++ show e
-        Right encoded -> case decodeEnvelope encoded of
-          Right (Just decoded, _) -> decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
-  , testCase "unknown even type fails" $ do
-      let bs = encodeU16 100 <> "payload"  -- 100 is even, unknown
-      case decodeEnvelope bs of
-        Left (DecodeUnknownEvenType 100) -> pure ()
-        other -> assertFailure $ "expected unknown even: " ++ show other
-  , testCase "unknown odd type ignored" $ do
-      let bs = encodeU16 101 <> "payload"  -- 101 is odd, unknown
-      case decodeEnvelope bs of
-        Right (Nothing, Nothing) -> pure ()  -- ignored
-        other -> assertFailure $ "expected (Nothing, Nothing): " ++ show other
-  , testCase "insufficient bytes for type" $ do
-      case decodeEnvelope (BS.pack [0x00]) of
-        Left DecodeInsufficientBytes -> pure ()
-        other -> assertFailure $ "expected insufficient: " ++ show other
-  , testCase "message type codes" $ do
-      msgTypeWord MsgInit @?= 16
-      msgTypeWord MsgError @?= 17
-      msgTypeWord MsgPing @?= 18
-      msgTypeWord MsgPong @?= 19
-      msgTypeWord MsgWarning @?= 1
-      msgTypeWord MsgPeerStorage @?= 7
-      msgTypeWord MsgPeerStorageRet @?= 9
-  ]
-
--- Extension TLV tests ---------------------------------------------------------
-
-extension_tests :: TestTree
-extension_tests = testGroup "Extension TLV" [
-    testCase "encode envelope with extension (odd type)" $ do
-      let msg = MsgPingVal (Ping 10 "")
-          ext = unsafeTlvStream [TlvRecord 101 "extension data"]  -- odd type
-      case encodeEnvelope msg (Just ext) of
-        Left e -> assertFailure $ "encode failed: " ++ show e
-        Right encoded -> do
-          -- Should contain message + extension
-          assertBool "encoded should be longer" (BS.length encoded > 6)
-  , testCase "decode envelope with odd extension - skipped per BOLT#1" $ do
-      -- Per BOLT #1: unknown odd types are ignored (skipped)
-      let msg = MsgPingVal (Ping 10 "")
-          ext = unsafeTlvStream [TlvRecord 101 "ext"]  -- odd type
-      case encodeEnvelope msg (Just ext) of
-        Left e -> assertFailure $ "encode failed: " ++ show e
-        Right encoded -> case decodeEnvelope encoded of
-          Right (Just decoded, Just stream)
-            | null (unTlvStream stream) -> do
-                -- Extension is empty because unknown odd types are skipped
-                decoded @?= msg
-          other -> assertFailure $ "unexpected: " ++ show other
-  , testCase "decode envelope with unknown even extension fails" $ do
-      -- Per BOLT #1: unknown even types must cause failure
-      let pingPayload = mconcat [encodeU16 10, encodeU16 0]  -- numPong=10, len=0
-          extTlv = mconcat [encodeBigSize 100, encodeBigSize 3, "abc"]  -- even!
-          env = encodeU16 18 <> pingPayload <> extTlv  -- type 18 = ping
-      case decodeEnvelope env of
-        Left (DecodeInvalidExtension (TlvUnknownEvenType 100)) -> pure ()
-        other -> assertFailure $ "expected unknown even error: " ++ show other
-  , testCase "decode envelope with invalid extension fails" $ do
-      -- Ping + invalid TLV (non-strictly-increasing)
-      let pingPayload = mconcat [encodeU16 10, encodeU16 0]
-          badTlv = mconcat [
-              encodeBigSize 101, encodeBigSize 1, "a"  -- odd types for this test
-            , encodeBigSize 51, encodeBigSize 1, "b"   -- 51 < 101, invalid
-            ]
-          env = encodeU16 18 <> pingPayload <> badTlv
-      case decodeEnvelope env of
-        Left (DecodeInvalidExtension TlvNotStrictlyIncreasing) -> pure ()
-        other -> assertFailure $ "expected invalid extension: " ++ show other
-  , testCase "unknown even in extension fails even with odd types present" $ do
-      -- Mixed odd and even - should fail on the even type
-      let pingPayload = mconcat [encodeU16 10, encodeU16 0]
-          extTlv = mconcat [
-              encodeBigSize 101, encodeBigSize 1, "a"  -- odd, would be skipped
-            , encodeBigSize 200, encodeBigSize 1, "b"  -- even, must fail
-            ]
-          env = encodeU16 18 <> pingPayload <> extTlv
-      case decodeEnvelope env of
-        Left (DecodeInvalidExtension (TlvUnknownEvenType 200)) -> pure ()
-        other -> assertFailure $ "expected unknown even error: " ++ show other
-  ]
-
--- Bounds checking tests -------------------------------------------------------
-
-bounds_tests :: TestTree
-bounds_tests = testGroup "Bounds checking" [
-    testCase "encode ping with oversized ignored fails" $ do
-      let msg = Ping 10 (BS.replicate 70000 0x00)  -- > 65535
-      case encodeMessage (MsgPingVal msg) of
-        Left EncodeLengthOverflow -> pure ()
-        other -> assertFailure $ "expected overflow: " ++ show other
-  , testCase "encode pong with oversized ignored fails" $ do
-      let msg = Pong (BS.replicate 70000 0x00)
-      case encodeMessage (MsgPongVal msg) of
-        Left EncodeLengthOverflow -> pure ()
-        other -> assertFailure $ "expected overflow: " ++ show other
-  , testCase "encode error with oversized data fails" $ do
-      let cid = unsafeChannelId (BS.replicate 32 0x00)
-          msg = Error cid (BS.replicate 70000 0x00)
-      case encodeMessage (MsgErrorVal msg) of
-        Left EncodeLengthOverflow -> pure ()
-        other -> assertFailure $ "expected overflow: " ++ show other
-  , testCase "encode init with oversized features fails" $ do
-      let msg = Init "" (BS.replicate 70000 0x00) []
-      case encodeMessage (MsgInitVal msg) of
-        Left EncodeLengthOverflow -> pure ()
-        other -> assertFailure $ "expected overflow: " ++ show other
-  , testCase "encode peer_storage with oversized blob fails" $ do
-      let msg = PeerStorage (BS.replicate 70000 0x00)
-      case encodeMessage (MsgPeerStorageVal msg) of
-        Left EncodeLengthOverflow -> pure ()
-        other -> assertFailure $ "expected overflow: " ++ show other
-  , testCase "encode envelope exceeding 65535 bytes fails" $ do
-      -- Create a message that fits in encodeMessage but combined with
-      -- extension exceeds 65535 bytes total
-      let msg = MsgPongVal (Pong (BS.replicate 60000 0x00))
-          ext = unsafeTlvStream [TlvRecord 101 (BS.replicate 10000 0x00)]
-      case encodeEnvelope msg (Just ext) of
-        Left EncodeMessageTooLarge -> pure ()
-        other -> assertFailure $ "expected message too large: " ++ show other
-  ]
-
--- Property tests --------------------------------------------------------------
-
-property_tests :: TestTree
-property_tests = testGroup "Properties" [
-    testProperty "BigSize roundtrip" $ \(NonNegative n) ->
-      case decodeBigSize (encodeBigSize n) of
-        Just (m, rest) -> m == n && BS.null rest
-        Nothing -> False
-  , testProperty "U16 roundtrip" $ \w ->
-      decodeU16 (encodeU16 w) == Just (w, "")
-  , testProperty "U32 roundtrip" $ \w ->
-      decodeU32 (encodeU32 w) == Just (w, "")
-  , testProperty "U64 roundtrip" $ \w ->
-      decodeU64 (encodeU64 w) == Just (w, "")
-  , testProperty "Ping roundtrip" $ \(NonNegative num) bs ->
-      let ignored = BS.pack (take 1000 bs)
-          msg = Ping (fromIntegral
-            (num `mod` 65536 :: Integer)) ignored
-      in case encodeMessage (MsgPingVal msg) of
-           Left _ -> False
-           Right encoded -> case decodeMessage MsgPing encoded of
-             Right (MsgPingVal decoded, rest) ->
-               decoded == msg && BS.null rest
-             _ -> False
-  , testProperty "Pong roundtrip" $ \bs ->
-      let ignored = BS.pack (take 1000 bs)
-          msg = Pong ignored
-      in case encodeMessage (MsgPongVal msg) of
-           Left _ -> False
-           Right encoded -> case decodeMessage MsgPong encoded of
-             Right (MsgPongVal decoded, rest) ->
-               decoded == msg && BS.null rest
-             _ -> False
-  , testProperty "PeerStorage roundtrip" $ \bs ->
-      let blob = BS.pack (take 1000 bs)
-          msg = PeerStorage blob
-      in case encodeMessage (MsgPeerStorageVal msg) of
-           Left _ -> False
-           Right encoded ->
-             case decodeMessage MsgPeerStorage encoded of
-               Right (MsgPeerStorageVal decoded, rest) ->
-                 decoded == msg && BS.null rest
-               _ -> False
-  , testProperty "Error roundtrip" $ \bs ->
-      let cid = unsafeChannelId (BS.replicate 32 0x00)
-          dat = BS.pack (take 1000 bs)
-          msg = Error cid dat
-      in case encodeMessage (MsgErrorVal msg) of
-           Left _ -> False
-           Right encoded ->
-             case decodeMessage MsgError encoded of
-               Right (MsgErrorVal decoded, rest) ->
-                 decoded == msg && BS.null rest
-               _ -> False
-  , testProperty "Envelope with odd extension" $ \bs ->
-      let msg = MsgPingVal (Ping 42 "")
-          extData = BS.pack (take 100 bs)
-          ext = unsafeTlvStream
-            [TlvRecord 101 extData]
-      in case encodeEnvelope msg (Just ext) of
-           Left _ -> False
-           Right encoded -> case decodeEnvelope encoded of
-             Right (Just decoded, Just stream) ->
-               null (unTlvStream stream)
-               && decoded == msg
-             _ -> False
-  , testProperty "MinSigned roundtrip" $ \v ->
-      let encoded = encodeMinSigned v
-          len = BS.length encoded
-      in case decodeMinSigned len encoded of
-        Just (decoded, rest) ->
-          decoded == v && BS.null rest
-        Nothing -> False
-  , testProperty "ShortChannelId component roundtrip" $
-      forAll (choose (0, 0xFFFFFF)) $ \bh ->
-      forAll (choose (0, 0xFFFFFF)) $ \ti ->
-      forAll arbitrary $ \oi ->
-        case shortChannelId bh ti oi of
-          Nothing -> False
-          Just scid ->
-            scidBlockHeight scid == bh
-            && scidTxIndex scid == ti
-            && scidOutputIndex scid == oi
-  , testProperty "TLV stream enforces strict ordering" $
-      forAll (listOf (choose (0, 1000))) $ \types ->
-        case tlvStream (map (\t -> TlvRecord t "") types) of
-          Just stream ->
-            isStrictlyIncreasing
-              (map tlvType (unTlvStream stream))
-          Nothing ->
-            not (isStrictlyIncreasing types)
-  , testProperty "satToMsat/msatToSat roundtrip" $
-      forAll (choose (0, maxSafe)) $ \w ->
-        let s = Satoshi w
-        in msatToSat (satToMsat s) == s
-  ]
-
--- | Check that a list is strictly increasing.
-isStrictlyIncreasing :: Ord a => [a] -> Bool
-isStrictlyIncreasing [] = True
-isStrictlyIncreasing [_] = True
-isStrictlyIncreasing (x:y:rest) =
-  x < y && isStrictlyIncreasing (y : rest)
-
--- | Maximum Satoshi value that won't overflow Word64 when
---   multiplied by 1000 in satToMsat.
-maxSafe :: Word64
-maxSafe = maxBound `div` 1000
-
--- Helpers ---------------------------------------------------------------------
-
--- | Decode hex string (test-only helper).
---
--- Uses 'error' for invalid hex since all hex literals in tests are
--- known-valid compile-time constants. This is acceptable in test code
--- where the failure would indicate a bug in the test itself.
-unhex :: BS.ByteString -> BS.ByteString
-unhex bs = case B16.decode bs of
-  Just r  -> r
-  Nothing -> error $ "unhex: invalid hex literal: " ++ show bs

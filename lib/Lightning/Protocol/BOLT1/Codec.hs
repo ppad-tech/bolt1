@@ -1,8 +1,6 @@
-{-# OPTIONS_HADDOCK prune #-}
+{-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE LambdaCase #-}
 
 -- |
 -- Module: Lightning.Protocol.BOLT1.Codec
@@ -10,340 +8,277 @@
 -- License: MIT
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
--- Message encoding and decoding for BOLT #1.
+-- Encoding and decoding of BOLT #1 messages.
 
 module Lightning.Protocol.BOLT1.Codec (
-  -- * Encoding errors
     EncodeError(..)
-
-  -- * Message encoding
-  , encodeInit
-  , encodeError
-  , encodeWarning
-  , encodePing
-  , encodePong
-  , encodePeerStorage
-  , encodePeerStorageRetrieval
-  , encodeMessage
-  , encodeEnvelope
-
-  -- * Decoding errors
   , DecodeError(..)
 
-  -- * Message decoding
-  , decodeInit
-  , decodeError
-  , decodeWarning
-  , decodePing
-  , decodePong
-  , decodePeerStorage
-  , decodePeerStorageRetrieval
-  , decodeMessage
-  , decodeEnvelope
-  , decodeEnvelopeWith
+  , encode_envelope
+  , decode_envelope
+
+  , encode_message
+  , decode_message
+
+  , encode_init
+  , decode_init
+  , encode_error
+  , decode_error
+  , encode_warning
+  , decode_warning
+  , encode_ping
+  , decode_ping
+  , encode_pong
+  , decode_pong
+  , encode_peer_storage
+  , decode_peer_storage
+  , encode_peer_storage_retrieval
+  , decode_peer_storage_retrieval
+
+  , ping_response
   ) where
 
 import Control.DeepSeq (NFData)
-import Control.Monad (when, unless)
 import qualified Data.ByteString as BS
 import Data.Word (Word16, Word64)
 import GHC.Generics (Generic)
+import Lightning.Protocol.BOLT1.Message
 import Lightning.Protocol.BOLT1.Prim
 import Lightning.Protocol.BOLT1.TLV
-import Lightning.Protocol.BOLT1.Message
+import qualified Lightning.Protocol.BOLT9 as BOLT9
 
--- Encoding errors -------------------------------------------------------------
-
--- | Encoding errors.
+-- | Why a message failed to encode.
 data EncodeError
-  = EncodeLengthOverflow   -- ^ Field length exceeds u16 max (65535 bytes)
-  | EncodeMessageTooLarge  -- ^ Total message size exceeds 65535 bytes
-  deriving stock (Eq, Show, Generic)
+  = EncodeLengthOverflow
+    -- ^ a length-prefixed field exceeds 65535 bytes
+  | EncodeMessageTooLarge
+    -- ^ the message (type and payload) exceeds 65535 bytes
+  | EncodeInvalidTlvs
+    -- ^ a record in a @_tlvs@ field duplicates a typed field
+  deriving (Eq, Show, Generic)
 
 instance NFData EncodeError
 
--- Message encoding ------------------------------------------------------------
-
--- | Encode an Init message payload.
-encodeInit :: Init -> Either EncodeError BS.ByteString
-encodeInit (Init gf feat tlvs) = do
-  gfLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength gf)
-  featLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength feat)
-  Right $ mconcat
-    [ gfLen
-    , gf
-    , featLen
-    , feat
-    , encodeTlvStream (encodeInitTlvs tlvs)
-    ]
-
--- | Encode an Error message payload.
-encodeError :: Error -> Either EncodeError BS.ByteString
-encodeError (Error cid dat) = do
-  datLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength dat)
-  Right $ mconcat [unChannelId cid, datLen, dat]
-
--- | Encode a Warning message payload.
-encodeWarning :: Warning -> Either EncodeError BS.ByteString
-encodeWarning (Warning cid dat) = do
-  datLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength dat)
-  Right $ mconcat [unChannelId cid, datLen, dat]
-
--- | Encode a Ping message payload.
-encodePing :: Ping -> Either EncodeError BS.ByteString
-encodePing (Ping numPong ignored) = do
-  ignoredLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength ignored)
-  Right $ mconcat [encodeU16 numPong, ignoredLen, ignored]
-
--- | Encode a Pong message payload.
-encodePong :: Pong -> Either EncodeError BS.ByteString
-encodePong (Pong ignored) = do
-  ignoredLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength ignored)
-  Right $ mconcat [ignoredLen, ignored]
-
--- | Encode a PeerStorage message payload.
-encodePeerStorage :: PeerStorage -> Either EncodeError BS.ByteString
-encodePeerStorage (PeerStorage blob) = do
-  blobLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength blob)
-  Right $ mconcat [blobLen, blob]
-
--- | Encode a PeerStorageRetrieval message payload.
-encodePeerStorageRetrieval
-  :: PeerStorageRetrieval -> Either EncodeError BS.ByteString
-encodePeerStorageRetrieval (PeerStorageRetrieval blob) = do
-  blobLen <- maybe (Left EncodeLengthOverflow) Right (encodeLength blob)
-  Right $ mconcat [blobLen, blob]
-
--- | Encode a message to its payload bytes.
---
--- Checks that the payload does not exceed 65533 bytes (the maximum
--- possible given the 2-byte type field and 65535-byte message limit).
-encodeMessage :: Message -> Either EncodeError BS.ByteString
-encodeMessage msg = do
-  payload <- case msg of
-    MsgInitVal m                 -> encodeInit m
-    MsgErrorVal m                -> encodeError m
-    MsgWarningVal m              -> encodeWarning m
-    MsgPingVal m                 -> encodePing m
-    MsgPongVal m                 -> encodePong m
-    MsgPeerStorageVal m          -> encodePeerStorage m
-    MsgPeerStorageRetrievalVal m -> encodePeerStorageRetrieval m
-  -- Payload must leave room for 2-byte type (max 65533 bytes)
-  when (BS.length payload > 65533) $
-    Left EncodeMessageTooLarge
-  Right payload
-
--- | Encode a message as a complete envelope (type + payload + extension).
---
--- Per BOLT #1, the total message size must not exceed 65535 bytes.
-encodeEnvelope :: Message -> Maybe TlvStream -> Either EncodeError BS.ByteString
-encodeEnvelope msg mext = do
-  payload <- encodeMessage msg
-  let !typeBytes = encodeU16 (msgTypeWord (messageType msg))
-      !extBytes = maybe BS.empty encodeTlvStream mext
-      !result = mconcat [typeBytes, payload, extBytes]
-  -- Per BOLT #1: message size must fit in 2 bytes (max 65535)
-  when (BS.length result > 65535) $
-    Left EncodeMessageTooLarge
-  Right result
-
--- Decoding errors -------------------------------------------------------------
-
--- | Decoding errors.
+-- | Why a message failed to decode.
 data DecodeError
   = DecodeInsufficientBytes
-  | DecodeInvalidLength
-  | DecodeUnknownEvenType !Word16
-  | DecodeUnknownOddType !Word16
+    -- ^ the input ended before a field did
   | DecodeTlvError !TlvError
-  | DecodeInvalidChannelId
-  | DecodeInvalidExtension !TlvError
-  deriving stock (Eq, Show, Generic)
+    -- ^ the message's TLV stream is malformed
+  | DecodeInvalidTlvValue !Word64
+    -- ^ a known TLV record (of the given type) has a malformed value
+  | DecodeUnknownEvenType !Word16
+    -- ^ an unknown even message type; the connection must be closed
+  | DecodeUnknownOddType !Word16
+    -- ^ an unknown odd message type; the message must be ignored
+  deriving (Eq, Show, Generic)
 
 instance NFData DecodeError
 
--- Message decoding ------------------------------------------------------------
+-- framing --------------------------------------------------------------------
 
--- | Decode an Init message from payload bytes.
+-- | Prefix a payload with its message type. Fails if the result
+--   exceeds the 65535-byte message limit.
 --
--- Returns the decoded message and any remaining bytes.
-decodeInit :: BS.ByteString -> Either DecodeError (Init, BS.ByteString)
-decodeInit !bs = do
-  (gfLen, rest1) <- maybe (Left DecodeInsufficientBytes) Right
-                      (decodeU16 bs)
-  unless (BS.length rest1 >= fromIntegral gfLen) $
-    Left DecodeInsufficientBytes
-  let !gf = BS.take (fromIntegral gfLen) rest1
-      !rest2 = BS.drop (fromIntegral gfLen) rest1
-  (fLen, rest3) <- maybe (Left DecodeInsufficientBytes) Right
-                     (decodeU16 rest2)
-  unless (BS.length rest3 >= fromIntegral fLen) $
-    Left DecodeInsufficientBytes
-  let !feat = BS.take (fromIntegral fLen) rest3
-      !rest4 = BS.drop (fromIntegral fLen) rest3
-  -- Parse optional TLV stream (consumes all remaining bytes for init)
-  tlvs <- if BS.null rest4
-    then Right (unsafeTlvStream [])
-    else either (Left . DecodeTlvError) Right (decodeTlvStream rest4)
-  initTlvList <- either (Left . DecodeTlvError) Right
-                   (parseInitTlvs tlvs)
-  -- Init consumes all bytes (TLVs are part of init, not extensions)
-  Right (Init gf feat initTlvList, BS.empty)
+--   >>> encode_envelope 19 "\NUL\NUL"
+--   Right "\NUL\DC3\NUL\NUL"
+encode_envelope :: Word16 -> BS.ByteString -> Either EncodeError BS.ByteString
+encode_envelope t payload
+  | BS.length payload > 65533 = Left EncodeMessageTooLarge
+  | otherwise                 = Right (encode_u16 t <> payload)
 
--- | Decode an Error message from payload bytes.
-decodeError :: BS.ByteString -> Either DecodeError (Error, BS.ByteString)
-decodeError !bs = do
-  unless (BS.length bs >= 32) $ Left DecodeInsufficientBytes
-  let !cidBytes = BS.take 32 bs
-      !rest1 = BS.drop 32 bs
-  cid <- maybe (Left DecodeInvalidChannelId) Right (channelId cidBytes)
-  (dLen, rest2) <- maybe (Left DecodeInsufficientBytes) Right
-                     (decodeU16 rest1)
-  unless (BS.length rest2 >= fromIntegral dLen) $
-    Left DecodeInsufficientBytes
-  let !dat = BS.take (fromIntegral dLen) rest2
-      !rest3 = BS.drop (fromIntegral dLen) rest2
-  Right (Error cid dat, rest3)
-
--- | Decode a Warning message from payload bytes.
-decodeWarning :: BS.ByteString -> Either DecodeError (Warning, BS.ByteString)
-decodeWarning !bs = do
-  unless (BS.length bs >= 32) $ Left DecodeInsufficientBytes
-  let !cidBytes = BS.take 32 bs
-      !rest1 = BS.drop 32 bs
-  cid <- maybe (Left DecodeInvalidChannelId) Right (channelId cidBytes)
-  (dLen, rest2) <- maybe (Left DecodeInsufficientBytes) Right
-                     (decodeU16 rest1)
-  unless (BS.length rest2 >= fromIntegral dLen) $
-    Left DecodeInsufficientBytes
-  let !dat = BS.take (fromIntegral dLen) rest2
-      !rest3 = BS.drop (fromIntegral dLen) rest2
-  Right (Warning cid dat, rest3)
-
--- | Decode a Ping message from payload bytes.
-decodePing :: BS.ByteString -> Either DecodeError (Ping, BS.ByteString)
-decodePing !bs = do
-  (numPong, rest1) <- maybe (Left DecodeInsufficientBytes) Right
-                        (decodeU16 bs)
-  (bLen, rest2) <- maybe (Left DecodeInsufficientBytes) Right
-                     (decodeU16 rest1)
-  unless (BS.length rest2 >= fromIntegral bLen) $
-    Left DecodeInsufficientBytes
-  let !ignored = BS.take (fromIntegral bLen) rest2
-      !rest3 = BS.drop (fromIntegral bLen) rest2
-  Right (Ping numPong ignored, rest3)
-
--- | Decode a Pong message from payload bytes.
-decodePong :: BS.ByteString -> Either DecodeError (Pong, BS.ByteString)
-decodePong !bs = do
-  (bLen, rest1) <- maybe (Left DecodeInsufficientBytes) Right
-                     (decodeU16 bs)
-  unless (BS.length rest1 >= fromIntegral bLen) $
-    Left DecodeInsufficientBytes
-  let !ignored = BS.take (fromIntegral bLen) rest1
-      !rest2 = BS.drop (fromIntegral bLen) rest1
-  Right (Pong ignored, rest2)
-
--- | Decode a PeerStorage message from payload bytes.
-decodePeerStorage
-  :: BS.ByteString -> Either DecodeError (PeerStorage, BS.ByteString)
-decodePeerStorage !bs = do
-  (bLen, rest1) <- maybe (Left DecodeInsufficientBytes) Right
-                     (decodeU16 bs)
-  unless (BS.length rest1 >= fromIntegral bLen) $
-    Left DecodeInsufficientBytes
-  let !blob = BS.take (fromIntegral bLen) rest1
-      !rest2 = BS.drop (fromIntegral bLen) rest1
-  Right (PeerStorage blob, rest2)
-
--- | Decode a PeerStorageRetrieval message from payload bytes.
-decodePeerStorageRetrieval
-  :: BS.ByteString
-  -> Either DecodeError (PeerStorageRetrieval, BS.ByteString)
-decodePeerStorageRetrieval !bs = do
-  (bLen, rest1) <- maybe (Left DecodeInsufficientBytes) Right
-                     (decodeU16 bs)
-  unless (BS.length rest1 >= fromIntegral bLen) $
-    Left DecodeInsufficientBytes
-  let !blob = BS.take (fromIntegral bLen) rest1
-      !rest2 = BS.drop (fromIntegral bLen) rest1
-  Right (PeerStorageRetrieval blob, rest2)
-
--- | Decode a message from its type and payload.
+-- | Split a message into its type and payload.
 --
--- Returns the decoded message and any remaining bytes (for extensions).
--- For unknown types, returns an appropriate error.
-decodeMessage
-  :: MsgType -> BS.ByteString -> Either DecodeError (Message, BS.ByteString)
-decodeMessage MsgInit bs = do
-  (m, rest) <- decodeInit bs
-  Right (MsgInitVal m, rest)
-decodeMessage MsgError bs = do
-  (m, rest) <- decodeError bs
-  Right (MsgErrorVal m, rest)
-decodeMessage MsgWarning bs = do
-  (m, rest) <- decodeWarning bs
-  Right (MsgWarningVal m, rest)
-decodeMessage MsgPing bs = do
-  (m, rest) <- decodePing bs
-  Right (MsgPingVal m, rest)
-decodeMessage MsgPong bs = do
-  (m, rest) <- decodePong bs
-  Right (MsgPongVal m, rest)
-decodeMessage MsgPeerStorage bs = do
-  (m, rest) <- decodePeerStorage bs
-  Right (MsgPeerStorageVal m, rest)
-decodeMessage MsgPeerStorageRet bs = do
-  (m, rest) <- decodePeerStorageRetrieval bs
-  Right (MsgPeerStorageRetrievalVal m, rest)
-decodeMessage (MsgUnknown w) _
-  | even w    = Left (DecodeUnknownEvenType w)
-  | otherwise = Left (DecodeUnknownOddType w)
+--   >>> decode_envelope "\NUL\DC3\NUL\NUL"
+--   Right (19,"\NUL\NUL")
+decode_envelope :: BS.ByteString -> Either DecodeError (Word16, BS.ByteString)
+decode_envelope bs = case decode_u16 bs of
+  Just r  -> Right r
+  Nothing -> Left DecodeInsufficientBytes
 
--- | Decode a complete envelope (type + payload + optional extension).
+-- | Encode a BOLT #1 message, including its type.
 --
--- Per BOLT #1:
--- - Unknown odd message types are ignored (returns Nothing for message)
--- - Unknown even message types cause connection close (returns error)
--- - Invalid extension TLV causes connection close (returns error)
---
--- This uses the default policy of treating all extension TLV types as
--- unknown. Use 'decodeEnvelopeWith' for configurable extension handling.
---
--- Returns the decoded message (if known) and any extension TLVs.
-decodeEnvelope
-  :: BS.ByteString
-  -> Either DecodeError (Maybe Message, Maybe TlvStream)
-decodeEnvelope = decodeEnvelopeWith (const False)
+--   >>> encode_message (MsgPong (Pong "" empty_tlv_stream))
+--   Right "\NUL\DC3\NUL\NUL"
+encode_message :: Message -> Either EncodeError BS.ByteString
+encode_message m = do
+  payload <- case m of
+    MsgInit a                 -> encode_init a
+    MsgError a                -> encode_error a
+    MsgWarning a              -> encode_warning a
+    MsgPing a                 -> encode_ping a
+    MsgPong a                 -> encode_pong a
+    MsgPeerStorage a          -> encode_peer_storage a
+    MsgPeerStorageRetrieval a -> encode_peer_storage_retrieval a
+  encode_envelope (message_type m) payload
 
--- | Decode a complete envelope with configurable extension TLV handling.
+-- | Decode a BOLT #1 message, including its type.
 --
--- The predicate determines which extension TLV types are "known" and
--- should be preserved. Unknown even types cause failure; unknown odd
--- types are skipped.
+--   A type that BOLT #1 doesn't define yields 'DecodeUnknownEvenType'
+--   or 'DecodeUnknownOddType'; callers dispatching messages from other
+--   BOLTs should use 'decode_envelope' first.
 --
--- Use @decodeEnvelopeWith (const False)@ to reject all even extension
--- types (the default behavior of 'decodeEnvelope').
+--   >>> decode_message "\NUL\DC3\NUL\NUL"
+--   Right (MsgPong (Pong {pong_ignored = "", pong_tlvs = TlvStream []}))
+--   >>> decode_message "\NUL\DC4\NUL\NUL"
+--   Left (DecodeUnknownEvenType 20)
+decode_message :: BS.ByteString -> Either DecodeError Message
+decode_message bs = do
+  (t, payload) <- decode_envelope bs
+  case t of
+    16 -> MsgInit <$> decode_init payload
+    17 -> MsgError <$> decode_error payload
+    1  -> MsgWarning <$> decode_warning payload
+    18 -> MsgPing <$> decode_ping payload
+    19 -> MsgPong <$> decode_pong payload
+    7  -> MsgPeerStorage <$> decode_peer_storage payload
+    9  -> MsgPeerStorageRetrieval <$> decode_peer_storage_retrieval payload
+    _ | even t    -> Left (DecodeUnknownEvenType t)
+      | otherwise -> Left (DecodeUnknownOddType t)
+
+-- helpers --------------------------------------------------------------------
+
+prefixed :: BS.ByteString -> Either EncodeError BS.ByteString
+prefixed bs = maybe (Left EncodeLengthOverflow) Right (encode_u16_prefixed bs)
+
+need :: Maybe a -> Either DecodeError a
+need = maybe (Left DecodeInsufficientBytes) Right
+{-# INLINE need #-}
+
+-- an extension stream in which no types are known
+extension :: BS.ByteString -> Either DecodeError TlvStream
+extension bs = either (Left . DecodeTlvError) Right
+  (decode_tlv_stream (const False) bs)
+
+-- init -----------------------------------------------------------------------
+
+-- | Encode an 'Init' payload.
+encode_init :: Init -> Either EncodeError BS.ByteString
+encode_init (Init gf f nets addr tlvs) = do
+  gf' <- prefixed (BOLT9.render gf)
+  f'  <- prefixed (BOLT9.render f)
+  let known = maybe [] (\cs -> [TlvRecord 1 (mconcat (map un_chain_hash cs))])
+                nets
+           <> maybe [] (\a -> [TlvRecord 3 a]) addr
+  stream <- maybe (Left EncodeInvalidTlvs) Right
+              (tlv_stream (known <> un_tlv_stream tlvs))
+  pure (gf' <> f' <> encode_tlv_stream stream)
+
+-- | Decode an 'Init' payload.
+decode_init :: BS.ByteString -> Either DecodeError Init
+decode_init bs = do
+  (gf, r0) <- need (decode_u16_prefixed bs)
+  (f, r1)  <- need (decode_u16_prefixed r0)
+  stream   <- either (Left . DecodeTlvError) Right
+                (decode_tlv_stream (\t -> t == 1 || t == 3) r1)
+  nets <- traverse networks (lookup_tlv 1 stream)
+  pure Init
+    { init_global_features = BOLT9.parse gf
+    , init_features        = BOLT9.parse f
+    , init_networks        = nets
+    , init_remote_addr     = lookup_tlv 3 stream
+    , init_tlvs            = filter_tlv_stream (\t -> t /= 1 && t /= 3) stream
+    }
+  where
+    networks v
+      | BS.length v `rem` 32 /= 0 = Left (DecodeInvalidTlvValue 1)
+      | otherwise = Right (chunks v)
+    chunks !v = case decode_chain_hash v of
+      Just (h, rest) -> h : chunks rest
+      Nothing        -> []
+
+-- error, warning -------------------------------------------------------------
+
+-- | Encode an 'Error' payload.
+encode_error :: Error -> Either EncodeError BS.ByteString
+encode_error (Error cid dat tlvs) = do
+  dat' <- prefixed dat
+  pure (un_channel_id cid <> dat' <> encode_tlv_stream tlvs)
+
+-- | Decode an 'Error' payload.
+decode_error :: BS.ByteString -> Either DecodeError Error
+decode_error bs = do
+  (cid, r0) <- need (decode_channel_id bs)
+  (dat, r1) <- need (decode_u16_prefixed r0)
+  Error cid dat <$> extension r1
+
+-- | Encode a 'Warning' payload.
+encode_warning :: Warning -> Either EncodeError BS.ByteString
+encode_warning (Warning cid dat tlvs) = do
+  dat' <- prefixed dat
+  pure (un_channel_id cid <> dat' <> encode_tlv_stream tlvs)
+
+-- | Decode a 'Warning' payload.
+decode_warning :: BS.ByteString -> Either DecodeError Warning
+decode_warning bs = do
+  (cid, r0) <- need (decode_channel_id bs)
+  (dat, r1) <- need (decode_u16_prefixed r0)
+  Warning cid dat <$> extension r1
+
+-- ping, pong -----------------------------------------------------------------
+
+-- | Encode a 'Ping' payload.
+encode_ping :: Ping -> Either EncodeError BS.ByteString
+encode_ping (Ping n ign tlvs) = do
+  ign' <- prefixed ign
+  pure (encode_u16 n <> ign' <> encode_tlv_stream tlvs)
+
+-- | Decode a 'Ping' payload.
+decode_ping :: BS.ByteString -> Either DecodeError Ping
+decode_ping bs = do
+  (n, r0)   <- need (decode_u16 bs)
+  (ign, r1) <- need (decode_u16_prefixed r0)
+  Ping n ign <$> extension r1
+
+-- | Encode a 'Pong' payload.
+encode_pong :: Pong -> Either EncodeError BS.ByteString
+encode_pong (Pong ign tlvs) = do
+  ign' <- prefixed ign
+  pure (ign' <> encode_tlv_stream tlvs)
+
+-- | Decode a 'Pong' payload.
+decode_pong :: BS.ByteString -> Either DecodeError Pong
+decode_pong bs = do
+  (ign, r0) <- need (decode_u16_prefixed bs)
+  Pong ign <$> extension r0
+
+-- | The 'Pong' a node must send in reply to a 'Ping', if any. Per
+--   BOLT #1, a ping requesting 65532 or more bytes is ignored.
 --
--- Use @decodeEnvelopeWith (const True)@ to accept all extension types.
-decodeEnvelopeWith
-  :: (Word64 -> Bool)  -- ^ Predicate: is this extension TLV type known?
-  -> BS.ByteString
-  -> Either DecodeError (Maybe Message, Maybe TlvStream)
-decodeEnvelopeWith isKnownExt !bs = do
-  (typeWord, rest1) <- maybe (Left DecodeInsufficientBytes) Right
-                         (decodeU16 bs)
-  let !msgType = parseMsgType typeWord
-  case msgType of
-    MsgUnknown w
-      | even w    -> Left (DecodeUnknownEvenType w)
-      | otherwise -> Right (Nothing, Nothing)  -- Ignore unknown odd types
-    _ -> do
-      (msg, rest2) <- decodeMessage msgType rest1
-      -- Parse any remaining bytes as extension TLV
-      ext <- if BS.null rest2
-        then Right Nothing
-        else case decodeTlvStreamWith isKnownExt rest2 of
-          Left e  -> Left (DecodeInvalidExtension e)
-          Right s -> Right (Just s)
-      Right (Just msg, ext)
+--   >>> ping_response (Ping 4 "" empty_tlv_stream)
+--   Just (Pong {pong_ignored = "\NUL\NUL\NUL\NUL", pong_tlvs = TlvStream []})
+--   >>> ping_response (Ping 65532 "" empty_tlv_stream)
+--   Nothing
+ping_response :: Ping -> Maybe Pong
+ping_response (Ping n _ _)
+  | n >= 65532 = Nothing
+  | otherwise  =
+      Just (Pong (BS.replicate (fromIntegral n) 0x00) empty_tlv_stream)
+
+-- peer storage ---------------------------------------------------------------
+
+-- | Encode a 'PeerStorage' payload.
+encode_peer_storage :: PeerStorage -> Either EncodeError BS.ByteString
+encode_peer_storage (PeerStorage blob tlvs) = do
+  blob' <- prefixed blob
+  pure (blob' <> encode_tlv_stream tlvs)
+
+-- | Decode a 'PeerStorage' payload.
+decode_peer_storage :: BS.ByteString -> Either DecodeError PeerStorage
+decode_peer_storage bs = do
+  (blob, r0) <- need (decode_u16_prefixed bs)
+  PeerStorage blob <$> extension r0
+
+-- | Encode a 'PeerStorageRetrieval' payload.
+encode_peer_storage_retrieval
+  :: PeerStorageRetrieval -> Either EncodeError BS.ByteString
+encode_peer_storage_retrieval (PeerStorageRetrieval blob tlvs) = do
+  blob' <- prefixed blob
+  pure (blob' <> encode_tlv_stream tlvs)
+
+-- | Decode a 'PeerStorageRetrieval' payload.
+decode_peer_storage_retrieval
+  :: BS.ByteString -> Either DecodeError PeerStorageRetrieval
+decode_peer_storage_retrieval bs = do
+  (blob, r0) <- need (decode_u16_prefixed bs)
+  PeerStorageRetrieval blob <$> extension r0
