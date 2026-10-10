@@ -1,6 +1,5 @@
-{-# OPTIONS_HADDOCK prune #-}
+{-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingStrategies #-}
 
 -- |
 -- Module: Lightning.Protocol.BOLT1.Message
@@ -8,194 +7,126 @@
 -- License: MIT
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
--- Message types for BOLT #1.
+-- The messages defined by BOLT #1.
 
 module Lightning.Protocol.BOLT1.Message (
-  -- * Message types
-    MsgType(..)
-  , msgUnknown
-  , msgTypeWord
-  , parseMsgType
-
-  -- * Channel identifiers
-  , ChannelId
-  , channelId
-  , unChannelId
-  , allChannels
-
-  -- * Setup messages
-  , Init(..)
+    Init(..)
   , Error(..)
   , Warning(..)
-
-  -- * Control messages
   , Ping(..)
   , Pong(..)
-
-  -- * Peer storage messages
   , PeerStorage(..)
   , PeerStorageRetrieval(..)
-
-  -- * Message envelope
   , Message(..)
-  , messageType
-  , Envelope(..)
-  , envelope
+  , message_type
   ) where
 
 import Control.DeepSeq (NFData)
 import qualified Data.ByteString as BS
 import Data.Word (Word16)
 import GHC.Generics (Generic)
-import Lightning.Protocol.BOLT1.Prim (ChannelId, channelId,
-  unChannelId, allChannels)
+import Lightning.Protocol.BOLT1.Prim
 import Lightning.Protocol.BOLT1.TLV
+import qualified Lightning.Protocol.BOLT9 as BOLT9
 
--- Message types ---------------------------------------------------------------
-
--- | BOLT #1 message type codes.
-data MsgType
-  = MsgInit              -- ^ 16
-  | MsgError             -- ^ 17
-  | MsgPing              -- ^ 18
-  | MsgPong              -- ^ 19
-  | MsgWarning           -- ^ 1
-  | MsgPeerStorage       -- ^ 7
-  | MsgPeerStorageRet    -- ^ 9
-  | MsgUnknown !Word16   -- ^ Unknown type
-  deriving stock (Eq, Show, Generic)
-
-instance NFData MsgType
-
--- | Get the numeric type code for a message type.
-msgTypeWord :: MsgType -> Word16
-msgTypeWord MsgInit            = 16
-msgTypeWord MsgError           = 17
-msgTypeWord MsgPing            = 18
-msgTypeWord MsgPong            = 19
-msgTypeWord MsgWarning         = 1
-msgTypeWord MsgPeerStorage     = 7
-msgTypeWord MsgPeerStorageRet  = 9
-msgTypeWord (MsgUnknown w)     = w
-
--- | Parse a message type from a word.
-parseMsgType :: Word16 -> MsgType
-parseMsgType 16 = MsgInit
-parseMsgType 17 = MsgError
-parseMsgType 18 = MsgPing
-parseMsgType 19 = MsgPong
-parseMsgType 1  = MsgWarning
-parseMsgType 7  = MsgPeerStorage
-parseMsgType 9  = MsgPeerStorageRet
-parseMsgType w  = MsgUnknown w
-
--- | Smart constructor for unknown message types.
+-- | The @init@ message (type 16).
 --
--- Returns the appropriate known constructor for known
--- type codes (16, 17, 18, 19, 1, 7, 9) and only uses
--- 'MsgUnknown' for truly unknown codes.
-msgUnknown :: Word16 -> MsgType
-msgUnknown = parseMsgType
-{-# INLINE msgUnknown #-}
-
--- Message ADTs ----------------------------------------------------------------
-
--- | The init message (type 16).
+--   The two feature vectors are kept as received. Per BOLT #1, a
+--   receiver treats their union ('BOLT9.union') as the peer's
+--   features.
 data Init = Init
-  { initGlobalFeatures :: !BS.ByteString
-  , initFeatures       :: !BS.ByteString
-  , initTlvs           :: ![InitTlv]
-  } deriving stock (Eq, Show, Generic)
+  { init_global_features :: !BOLT9.FeatureVector
+  , init_features        :: !BOLT9.FeatureVector
+  , init_networks        :: !(Maybe [ChainHash])
+    -- ^ @networks@ (TLV type 1): chains the node is interested in
+  , init_remote_addr     :: !(Maybe BS.ByteString)
+    -- ^ @remote_addr@ (TLV type 3): a raw BOLT #7 address descriptor
+  , init_tlvs            :: !TlvStream
+    -- ^ unknown odd TLV records
+  } deriving (Eq, Show, Generic)
 
 instance NFData Init
 
--- | The error message (type 17).
+-- | The @error@ message (type 17).
 data Error = Error
-  { errorChannelId :: !ChannelId
-  , errorData      :: !BS.ByteString
-  } deriving stock (Eq, Show, Generic)
+  { error_channel_id :: !ChannelId
+  , error_data       :: !BS.ByteString
+  , error_tlvs       :: !TlvStream
+    -- ^ extension TLV records (all unknown odd)
+  } deriving (Eq, Show, Generic)
 
 instance NFData Error
 
--- | The warning message (type 1).
+-- | The @warning@ message (type 1).
 data Warning = Warning
-  { warningChannelId :: !ChannelId
-  , warningData      :: !BS.ByteString
-  } deriving stock (Eq, Show, Generic)
+  { warning_channel_id :: !ChannelId
+  , warning_data       :: !BS.ByteString
+  , warning_tlvs       :: !TlvStream
+    -- ^ extension TLV records (all unknown odd)
+  } deriving (Eq, Show, Generic)
 
 instance NFData Warning
 
--- | The ping message (type 18).
+-- | The @ping@ message (type 18).
 data Ping = Ping
-  { pingNumPongBytes :: {-# UNPACK #-} !Word16
-  , pingIgnored      :: !BS.ByteString
-  } deriving stock (Eq, Show, Generic)
+  { ping_num_pong_bytes :: {-# UNPACK #-} !Word16
+  , ping_ignored        :: !BS.ByteString
+  , ping_tlvs           :: !TlvStream
+    -- ^ extension TLV records (all unknown odd)
+  } deriving (Eq, Show, Generic)
 
 instance NFData Ping
 
--- | The pong message (type 19).
+-- | The @pong@ message (type 19).
 data Pong = Pong
-  { pongIgnored :: !BS.ByteString
-  } deriving stock (Eq, Show, Generic)
+  { pong_ignored :: !BS.ByteString
+  , pong_tlvs    :: !TlvStream
+    -- ^ extension TLV records (all unknown odd)
+  } deriving (Eq, Show, Generic)
 
 instance NFData Pong
 
--- | The peer_storage message (type 7).
+-- | The @peer_storage@ message (type 7).
 data PeerStorage = PeerStorage
-  { peerStorageBlob :: !BS.ByteString
-  } deriving stock (Eq, Show, Generic)
+  { peer_storage_blob :: !BS.ByteString
+  , peer_storage_tlvs :: !TlvStream
+    -- ^ extension TLV records (all unknown odd)
+  } deriving (Eq, Show, Generic)
 
 instance NFData PeerStorage
 
--- | The peer_storage_retrieval message (type 9).
+-- | The @peer_storage_retrieval@ message (type 9).
 data PeerStorageRetrieval = PeerStorageRetrieval
-  { peerStorageRetrievalBlob :: !BS.ByteString
-  } deriving stock (Eq, Show, Generic)
+  { peer_storage_retrieval_blob :: !BS.ByteString
+  , peer_storage_retrieval_tlvs :: !TlvStream
+    -- ^ extension TLV records (all unknown odd)
+  } deriving (Eq, Show, Generic)
 
 instance NFData PeerStorageRetrieval
 
--- | All BOLT #1 messages.
+-- | A BOLT #1 message.
 data Message
-  = MsgInitVal !Init
-  | MsgErrorVal !Error
-  | MsgWarningVal !Warning
-  | MsgPingVal !Ping
-  | MsgPongVal !Pong
-  | MsgPeerStorageVal !PeerStorage
-  | MsgPeerStorageRetrievalVal !PeerStorageRetrieval
-  deriving stock (Eq, Show, Generic)
+  = MsgInit !Init
+  | MsgError !Error
+  | MsgWarning !Warning
+  | MsgPing !Ping
+  | MsgPong !Pong
+  | MsgPeerStorage !PeerStorage
+  | MsgPeerStorageRetrieval !PeerStorageRetrieval
+  deriving (Eq, Show, Generic)
 
 instance NFData Message
 
--- | Get the message type for a message.
-messageType :: Message -> MsgType
-messageType (MsgInitVal _)                 = MsgInit
-messageType (MsgErrorVal _)                = MsgError
-messageType (MsgWarningVal _)              = MsgWarning
-messageType (MsgPingVal _)                 = MsgPing
-messageType (MsgPongVal _)                 = MsgPong
-messageType (MsgPeerStorageVal _)          = MsgPeerStorage
-messageType (MsgPeerStorageRetrievalVal _) = MsgPeerStorageRet
-
--- Message envelope ------------------------------------------------------------
-
--- | A complete message envelope with type, payload,
--- and optional extension.
-data Envelope = Envelope
-  { envType      :: !MsgType
-  , envPayload   :: !BS.ByteString
-  , envExtension :: !(Maybe TlvStream)
-  } deriving stock (Eq, Show, Generic)
-
-instance NFData Envelope
-
--- | Construct an 'Envelope' from a 'Message' and optional
--- extension TLV stream. The 'envType' is derived
--- automatically from the 'Message'.
-envelope :: Message -> Maybe TlvStream -> Envelope
-envelope msg mext = Envelope
-  { envType      = messageType msg
-  , envPayload   = BS.empty
-  , envExtension = mext
-  }
-{-# INLINE envelope #-}
+-- | The wire type of a 'Message'.
+--
+--   >>> message_type (MsgPong (Pong "" empty_tlv_stream))
+--   19
+message_type :: Message -> Word16
+message_type m = case m of
+  MsgInit {}                 -> 16
+  MsgError {}                -> 17
+  MsgWarning {}              -> 1
+  MsgPing {}                 -> 18
+  MsgPong {}                 -> 19
+  MsgPeerStorage {}          -> 7
+  MsgPeerStorageRetrieval {} -> 9

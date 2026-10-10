@@ -1,7 +1,6 @@
-{-# OPTIONS_HADDOCK prune #-}
+{-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingStrategies #-}
 
 -- |
 -- Module: Lightning.Protocol.BOLT1.TLV
@@ -9,236 +8,149 @@
 -- License: MIT
 -- Maintainer: Jared Tobin <jared@ppad.tech>
 --
--- TLV (Type-Length-Value) format for BOLT #1.
+-- The TLV (type-length-value) format of BOLT #1.
 
 module Lightning.Protocol.BOLT1.TLV (
-  -- * TLV types
     TlvRecord(..)
   , TlvStream
-  , unTlvStream
-  , tlvStream
-  , unsafeTlvStream
+  , tlv_stream
+  , un_tlv_stream
+  , empty_tlv_stream
+  , lookup_tlv
+  , filter_tlv_stream
   , TlvError(..)
-
-  -- * TLV encoding
-  , encodeTlvRecord
-  , encodeTlvStream
-
-  -- * TLV decoding
-  , decodeTlvStream
-  , decodeTlvStreamWith
-  , decodeTlvStreamRaw
-
-  -- * Init TLV types
-  , InitTlv(..)
-  , parseInitTlvs
-  , encodeInitTlvs
-
-  -- * Re-exports
-  , ChainHash
-  , chainHash
-  , unChainHash
+  , encode_tlv_stream
+  , decode_tlv_stream
   ) where
 
 import Control.DeepSeq (NFData)
-import Control.Monad (when)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Unsafe as BU
+import qualified Data.List as L
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Lightning.Protocol.BOLT1.Prim
 
--- TLV types -------------------------------------------------------------------
-
 -- | A single TLV record.
 data TlvRecord = TlvRecord
-  { tlvType   :: {-# UNPACK #-} !Word64
-  , tlvValue  :: !BS.ByteString
-  } deriving stock (Eq, Show, Generic)
+  { tlv_type  :: {-# UNPACK #-} !Word64
+  , tlv_value :: !BS.ByteString
+  } deriving (Eq, Show, Generic)
 
 instance NFData TlvRecord
 
--- | A TLV stream (series of TLV records).
-newtype TlvStream = TlvStream { unTlvStream :: [TlvRecord] }
-  deriving stock (Eq, Show, Generic)
+-- | A TLV stream: records in strictly increasing type order.
+newtype TlvStream = TlvStream [TlvRecord]
+  deriving (Eq, Show, Generic)
 
 instance NFData TlvStream
 
--- | Smart constructor for 'TlvStream' that validates records are
--- strictly increasing by type.
+-- | Construct a 'TlvStream' from records in any order. Fails if two
+--   records share a type.
 --
--- Returns 'Nothing' if types are not strictly increasing.
-tlvStream :: [TlvRecord] -> Maybe TlvStream
-tlvStream recs
-  | isStrictlyIncreasing (map tlvType recs) = Just (TlvStream recs)
-  | otherwise = Nothing
+--   >>> let Just s = tlv_stream [TlvRecord 3 "b", TlvRecord 1 "a"]
+--   >>> map tlv_type (un_tlv_stream s)
+--   [1,3]
+--   >>> tlv_stream [TlvRecord 1 "a", TlvRecord 1 "b"]
+--   Nothing
+tlv_stream :: [TlvRecord] -> Maybe TlvStream
+tlv_stream rs
+  | increasing sorted = Just (TlvStream sorted)
+  | otherwise         = Nothing
   where
-    isStrictlyIncreasing :: [Word64] -> Bool
-    isStrictlyIncreasing [] = True
-    isStrictlyIncreasing [_] = True
-    isStrictlyIncreasing (x:y:rest) = x < y && isStrictlyIncreasing (y:rest)
+    sorted = L.sortOn tlv_type rs
 
--- | Unsafe constructor for 'TlvStream' that skips validation.
+increasing :: [TlvRecord] -> Bool
+increasing (a:rest@(b:_)) = tlv_type a < tlv_type b && increasing rest
+increasing _ = True
+
+-- | The records of a 'TlvStream', in increasing type order.
+un_tlv_stream :: TlvStream -> [TlvRecord]
+un_tlv_stream (TlvStream rs) = rs
+{-# INLINE un_tlv_stream #-}
+
+-- | The empty 'TlvStream'.
+empty_tlv_stream :: TlvStream
+empty_tlv_stream = TlvStream []
+
+-- | The value of the record with the given type, if present.
 --
--- Use only when ordering is already guaranteed (e.g., in decode functions).
-unsafeTlvStream :: [TlvRecord] -> TlvStream
-unsafeTlvStream = TlvStream
+--   >>> lookup_tlv 3 =<< tlv_stream [TlvRecord 1 "a", TlvRecord 3 "b"]
+--   Just "b"
+lookup_tlv :: Word64 -> TlvStream -> Maybe BS.ByteString
+lookup_tlv t (TlvStream rs) = go rs
+  where
+    go [] = Nothing
+    go (TlvRecord u v : more)
+      | u == t    = Just v
+      | u > t     = Nothing
+      | otherwise = go more
 
--- | TLV decoding errors.
+-- | Keep the records whose types satisfy the predicate.
+--
+--   >>> let Just s = tlv_stream [TlvRecord 1 "", TlvRecord 2 ""]
+--   >>> map tlv_type (un_tlv_stream (filter_tlv_stream odd s))
+--   [1]
+filter_tlv_stream :: (Word64 -> Bool) -> TlvStream -> TlvStream
+filter_tlv_stream p (TlvStream rs) = TlvStream (filter (p . tlv_type) rs)
+
+-- | Why a TLV stream failed to decode.
 data TlvError
-  = TlvNonMinimalEncoding
-  | TlvNotStrictlyIncreasing
-  | TlvLengthExceedsBounds
-  | TlvUnknownEvenType !Word64
-  | TlvInvalidKnownType !Word64
-  deriving stock (Eq, Show, Generic)
+  = TlvTruncated               -- ^ a type, length or value was cut off
+  | TlvNonMinimalBigSize       -- ^ a type or length wasn't minimal
+  | TlvNotStrictlyIncreasing   -- ^ types out of order or repeated
+  | TlvUnknownEvenType !Word64 -- ^ an even type the context doesn't know
+  deriving (Eq, Show, Generic)
 
 instance NFData TlvError
 
--- TLV encoding ----------------------------------------------------------------
-
--- | Encode a TLV record.
-encodeTlvRecord :: TlvRecord -> BS.ByteString
-encodeTlvRecord (TlvRecord typ val) = mconcat
-  [ encodeBigSize typ
-  , encodeBigSize (fromIntegral (BS.length val))
-  , val
-  ]
-
--- | Encode a TLV stream.
-encodeTlvStream :: TlvStream -> BS.ByteString
-encodeTlvStream (TlvStream recs) = mconcat (map encodeTlvRecord recs)
-
--- TLV decoding ----------------------------------------------------------------
-
--- | Decode a TLV stream without any known-type validation.
+-- | Encode a 'TlvStream'.
 --
--- This decoder only enforces structural validity:
--- - Types must be strictly increasing
--- - Lengths must not exceed bounds
---
--- All records are returned regardless of type. Note: this does NOT
--- enforce the BOLT #1 unknown-even-type rule. Use 'decodeTlvStreamWith'
--- with an appropriate predicate for spec-compliant parsing.
-decodeTlvStreamRaw :: BS.ByteString -> Either TlvError TlvStream
-decodeTlvStreamRaw = go Nothing []
+--   >>> fmap encode_tlv_stream (tlv_stream [TlvRecord 1 "a"])
+--   Just "\SOH\SOHa"
+encode_tlv_stream :: TlvStream -> BS.ByteString
+encode_tlv_stream (TlvStream rs) = mconcat (concatMap enc rs)
   where
-    go :: Maybe Word64 -> [TlvRecord] -> BS.ByteString
-       -> Either TlvError TlvStream
-    go !_ !acc !bs
-      | BS.null bs = Right (unsafeTlvStream (reverse acc))
-    go !mPrevType !acc !bs = do
-      (typ, rest1) <- maybe (Left TlvNonMinimalEncoding) Right
-                        (decodeBigSize bs)
-      -- Strictly increasing check
-      case mPrevType of
-        Just prevType -> when (typ <= prevType) $
-          Left TlvNotStrictlyIncreasing
-        Nothing -> pure ()
-      (len, rest2) <- maybe (Left TlvNonMinimalEncoding) Right
-                        (decodeBigSize rest1)
-      -- Length bounds check (in Word64, so huge lengths can't wrap)
-      when (len > fromIntegral (BS.length rest2)) $
-        Left TlvLengthExceedsBounds
-      let !val = BS.take (fromIntegral len) rest2
-          !rest3 = BS.drop (fromIntegral len) rest2
-          !rec = TlvRecord typ val
-      go (Just typ) (rec : acc) rest3
+    enc (TlvRecord t v) =
+      [encode_bigsize t, encode_bigsize (fromIntegral (BS.length v)), v]
 
--- | Decode a TLV stream with configurable known-type predicate.
+-- | Decode a TLV stream occupying the whole input, given a predicate
+--   identifying the types known in the stream's context.
 --
--- Per BOLT #1:
--- - Types must be strictly increasing
--- - Unknown even types cause failure
--- - Unknown odd types are skipped
+--   Per BOLT #1, decoding fails on truncation, non-minimal BigSize
+--   encodings, types that are not strictly increasing, and unknown
+--   even types. Every record is kept, including unknown odd ones, so
+--   re-encoding reproduces the input.
 --
--- The predicate determines which types are "known" for the context.
-decodeTlvStreamWith
-  :: (Word64 -> Bool)  -- ^ Predicate: is this type known?
+--   >>> let Right s = decode_tlv_stream (== 1) "\SOH\SOHa\ETX\NUL"
+--   >>> map tlv_type (un_tlv_stream s)
+--   [1,3]
+--   >>> decode_tlv_stream (== 1) "\STX\NUL"
+--   Left (TlvUnknownEvenType 2)
+decode_tlv_stream
+  :: (Word64 -> Bool)  -- ^ is this type known?
   -> BS.ByteString
   -> Either TlvError TlvStream
-decodeTlvStreamWith isKnown = go Nothing []
+decode_tlv_stream known = go Nothing []
   where
-    go :: Maybe Word64 -> [TlvRecord] -> BS.ByteString
-       -> Either TlvError TlvStream
-    go !_ !acc !bs
-      | BS.null bs = Right (unsafeTlvStream (reverse acc))
-    go !mPrevType !acc !bs = do
-      (typ, rest1) <- maybe (Left TlvNonMinimalEncoding) Right
-                        (decodeBigSize bs)
-      -- Strictly increasing check
-      case mPrevType of
-        Just prevType -> when (typ <= prevType) $
-          Left TlvNotStrictlyIncreasing
-        Nothing -> pure ()
-      (len, rest2) <- maybe (Left TlvNonMinimalEncoding) Right
-                        (decodeBigSize rest1)
-      -- Length bounds check (in Word64, so huge lengths can't wrap)
-      when (len > fromIntegral (BS.length rest2)) $
-        Left TlvLengthExceedsBounds
-      let !val = BS.take (fromIntegral len) rest2
-          !rest3 = BS.drop (fromIntegral len) rest2
-          !rec = TlvRecord typ val
-      -- Unknown type handling: even = fail, odd = skip
-      if isKnown typ
-        then go (Just typ) (rec : acc) rest3
-        else if even typ
-          then Left (TlvUnknownEvenType typ)
-          else go (Just typ) acc rest3  -- skip unknown odd
+    go !_ !acc !bs | BS.null bs = Right (TlvStream (reverse acc))
+    go !prev !acc !bs = do
+      (t, r0) <- bigsize bs
+      case prev of
+        Just p | t <= p -> Left TlvNotStrictlyIncreasing
+        _ -> pure ()
+      (l, r1) <- bigsize r0
+      if l > fromIntegral (BS.length r1)
+        then Left TlvTruncated
+        else do
+          let !n = fromIntegral l
+              !v = BU.unsafeTake n r1
+              !r2 = BU.unsafeDrop n r1
+          if not (known t) && even t
+            then Left (TlvUnknownEvenType t)
+            else go (Just t) (TlvRecord t v : acc) r2
 
--- | Decode a TLV stream with BOLT #1 init_tlvs validation.
---
--- This uses the default known types for init messages (1 and 3).
--- For other contexts, use 'decodeTlvStreamWith' with an appropriate
--- predicate.
-decodeTlvStream :: BS.ByteString -> Either TlvError TlvStream
-decodeTlvStream = decodeTlvStreamWith isInitTlvType
-  where
-    isInitTlvType :: Word64 -> Bool
-    isInitTlvType 1 = True  -- networks
-    isInitTlvType 3 = True  -- remote_addr
-    isInitTlvType _ = False
-
--- Init TLV types --------------------------------------------------------------
-
--- | TLV records for init message.
-data InitTlv
-  = InitNetworks ![ChainHash]      -- ^ Type 1: chain hashes (32 bytes each)
-  | InitRemoteAddr !BS.ByteString  -- ^ Type 3: remote address
-  deriving stock (Eq, Show, Generic)
-
-instance NFData InitTlv
-
--- | Parse init TLVs from a TLV stream.
-parseInitTlvs :: TlvStream -> Either TlvError [InitTlv]
-parseInitTlvs (TlvStream recs) = traverse parseOne recs
-  where
-    parseOne (TlvRecord 1 val)
-      | BS.length val `mod` 32 == 0 =
-          Right (InitNetworks (map mkChainHash (chunksOf 32 val)))
-      | otherwise = Left (TlvInvalidKnownType 1)
-    parseOne (TlvRecord 3 val) = Right (InitRemoteAddr val)
-    parseOne (TlvRecord t _) = Left (TlvUnknownEvenType t)
-
-    -- Each chunk is exactly 32 bytes from chunksOf, so chainHash always
-    -- succeeds. We use a partial pattern match as the Nothing case is
-    -- unreachable given our chunksOf guarantee.
-    mkChainHash bs = case chainHash bs of
-      Just ch -> ch
-      Nothing -> error "parseInitTlvs: impossible - chunk is not 32 bytes"
-
--- | Split bytestring into chunks of given size.
-chunksOf :: Int -> BS.ByteString -> [BS.ByteString]
-chunksOf !n !bs
-  | BS.null bs = []
-  | otherwise =
-      let (!chunk, !rest) = BS.splitAt n bs
-      in  chunk : chunksOf n rest
-
--- | Encode init TLVs to a TLV stream.
-encodeInitTlvs :: [InitTlv] -> TlvStream
-encodeInitTlvs = unsafeTlvStream . map toRecord
-  where
-    toRecord (InitNetworks chains) =
-      TlvRecord 1 (mconcat (map unChainHash chains))
-    toRecord (InitRemoteAddr addr) =
-      TlvRecord 3 addr
+    bigsize b = case decode_bigsize_detailed b of
+      Right r                -> Right r
+      Left BigSizeTruncated  -> Left TlvTruncated
+      Left BigSizeNonMinimal -> Left TlvNonMinimalBigSize
