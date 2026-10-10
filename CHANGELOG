@@ -1,4 +1,34 @@
 # Changelog
 
-- 0.0.1 (2025-01-25)
+- 0.1.0 (UNRELEASED)
+  * A substantial rewrite, with breaking changes throughout:
+
+    * The API is exported from Lightning.Protocol.BOLT1 alone, and uses
+      snake_case names (e.g. encode_message, channel_id, un_channel_id).
+
+    * Fundamental types are abstract, constructed only via validating
+      smart constructors. Points must carry a compressed-encoding
+      prefix. Satoshi and MilliSatoshi are bounded at 21M BTC and
+      provide checked arithmetic instead of Num.
+
+    * Every message decoder consumes its whole payload and preserves
+      unknown odd TLV records, so encoding a decoded message reproduces
+      its wire bytes. Init has typed networks and remote_addr fields,
+      and uses ppad-bolt9 feature vectors.
+
+    * A single TLV decoder takes the set of known types, rejects
+      unknown even types, and keeps unknown odd ones.
+
+    * Removed the Envelope type, the minimal signed integer codecs and
+      the Internal module; added ping_response and fixed-size field
+      codecs.
+
+  * Fixes TLV decoding, which accepted lengths of 2^63 or more as
+    empty values.
+
+  * Fixed-width encoders no longer allocate kilobytes per call.
+
+  * Tests now cover every BOLT #1 appendix vector.
+
+- 0.0.1 (2026-04-18)
   * Initial release.

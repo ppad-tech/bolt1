@@ -6,10 +6,11 @@ Specification: https://github.com/lightning/bolts/blob/master/01-messaging.md
 
 ## Project Structure
 
-- `lib/` - library source (Lightning.Protocol.BOLT1)
+- `lib/` - library source (public API: Lightning.Protocol.BOLT1;
+  submodules are internal)
 - `test/` - tests (tasty + tasty-hunit)
 - `bench/` - benchmarks (criterion for timing, weigh for allocations)
-- `etc/` - reference materials (BOLT spec)
+- `etc/` - reference materials (BOLT spec, pinned upstream commit)
 - `flake.nix` - nix flake for dependency and build management
 - `ppad-bolt1.cabal` - cabal package definition
 - `CLAUDE.md` / `AGENTS.md` - keep these in sync
@@ -135,5 +136,4 @@ When planning work:
 The flake.nix follows ppad conventions:
 - Uses ppad-nixpkgs as base
 - Follows references to avoid duplication
-- Supports LLVM backend via cabal flag
 - Provides devShell with ghc, cabal, cc, llvm
